@@ -1,10 +1,10 @@
-import { fileError, formatBytes, planQueue } from "./files.js";
+import { fileError, formatBytes, planQueue } from "./files.js?v=2";
 import {
   resolveDestination,
   listEntries,
   copyFile,
   friendlyError,
-} from "./disk.js";
+} from "./disk.js?v=2";
 import { requestDataDisk } from "./serial.js";
 import { config } from "./config.js";
 
@@ -150,7 +150,7 @@ function renderQueue() {
           ? "Select your Playdate drive to get started."
           : !state.items.length
             ? `${state.entries.filter((entry) => entry.kind === "file" && /\.epub$/i.test(entry.name)).length} books on your Playdate. Choose a few more.`
-            : `${ready} ${ready === 1 ? "book" : "books"} ready to copy. Existing books stay untouched.`;
+            : `${ready} ${ready === 1 ? "book" : "books"} ready to copy. ${state.plan.some((row) => row.status === "ready" && row.overwrite) ? "Matching books will be overwritten." : "Existing books stay untouched."}`;
   updateFlow();
 }
 
@@ -342,6 +342,7 @@ async function runImport() {
       try {
         await copyFile(disk.directory, row.file, row.destination, {
           signal: controller.signal,
+          overwrite: row.overwrite,
           onProgress: (progress) => {
             if (row.status !== progress.phase) {
               row.status = progress.phase;

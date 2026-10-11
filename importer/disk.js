@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { isEpub, nameKey, nameError } from "./files.js";
+import { isEpub, nameKey, nameError } from "./files.js?v=2";
 
 export async function resolveDestination(root) {
   try {
@@ -41,7 +41,12 @@ export async function copyFile(
   directory,
   file,
   name,
-  { signal, onProgress = () => {}, chunkBytes = config.chunkBytes } = {},
+  {
+    signal,
+    onProgress = () => {},
+    chunkBytes = config.chunkBytes,
+    overwrite = false,
+  } = {},
 ) {
   if (!file.size) throw new Error("This file is empty.");
   const invalid = nameError(name);
@@ -50,29 +55,35 @@ export async function copyFile(
     throw new Error("Invalid copy chunk size.");
   checkCancelled(signal);
   const entries = await listEntries(directory);
-  if (entries.some((entry) => nameKey(entry.name) === nameKey(name)))
+  const existing = entries.find(
+    (entry) => nameKey(entry.name) === nameKey(name),
+  );
+  if (existing && (!overwrite || existing.kind !== "file"))
     throw new Error(
       "This filename appeared on the drive. Select the drive again to review duplicates.",
     );
   if (
+    !existing &&
     entries.filter((entry) => entry.kind === "file" && isEpub(entry.name))
       .length >= config.maxBooks
   )
     throw new Error("The library is full. No file was copied.");
   checkCancelled(signal);
+  if (existing) name = existing.name;
 
   let handle;
   let writable;
   let owned = false;
+  let committed = false;
   try {
     // The picker API has no exclusive-create operation. Recheck before creating,
     // and require users to keep other file managers out of this folder during import.
-    handle = await directory.getFileHandle(name, { create: true });
-    if ((await handle.getFile()).size !== 0)
+    handle = await directory.getFileHandle(name, { create: !existing });
+    if (!existing && (await handle.getFile()).size !== 0)
       throw new Error(
         "A file appeared during import. It was left untouched; select the drive again.",
       );
-    owned = true;
+    owned = !existing;
     writable = await handle.createWritable({
       keepExistingData: false,
       mode: "exclusive",
@@ -91,6 +102,7 @@ export async function copyFile(
     checkCancelled(signal);
     await writable.close();
     writable = null;
+    committed = true;
     const copied = await handle.getFile();
     if (copied.size !== file.size)
       throw new Error("The copied file has a different size.");
@@ -119,6 +131,9 @@ export async function copyFile(
       } catch {
         /* The drive may already be disconnected. */
       }
+    }
+    if (existing && committed) {
+      error.cleanupMessage = `Check “${name}” on the drive: the replacement could not be verified. The previous book has already been overwritten.`;
     }
     if (owned) {
       try {

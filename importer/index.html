@@ -15,7 +15,7 @@
     <title>Add books · Readr</title>
     <link rel="icon" href="./icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="./style.css" />
-    <script type="module" src="./app.js"></script>
+    <script type="module" src="./app.js?v=2"></script>
   </head>
   <body>
     <header class="site-header">
@@ -29,10 +29,9 @@
     </header>
     <main id="main">
       <div class="intro">
-        <h1>Your next read,<br />ready to go.</h1>
+        <h1>ePub Importer</h1>
         <p>
-          Bring your EPUB books to Playdate.<br />Connect, choose, copy. No app
-          to install.
+          Bring your EPUB books to Playdate.<br />Connect, choose, copy.
         </p>
       </div>
       <aside class="device-art" aria-hidden="true">
@@ -68,7 +67,7 @@
             <span class="section-number">01</span>
             <div>
               <h2 id="connect-heading">Make a connection</h2>
-              <p>Install and open readr once before adding books.</p>
+              <p>Install and open Readr once before adding books.</p>
             </div>
             <span id="drive-chip" class="chip">Not connected</span>
           </div>
@@ -121,7 +120,7 @@
             <div>
               <h2 id="books-heading">Choose your next reads</h2>
               <p>
-                Ordinary, DRM-free EPUBs. Your files stay exactly as they are.
+                Ordinary, DRM-free EPUBs.
               </p>
             </div>
             <span id="book-count" class="chip">0 books</span>
@@ -148,7 +147,8 @@
             <label for="duplicate-policy">When a name already exists</label
             ><select id="duplicate-policy">
               <option value="skip">Skip existing</option>
-              <option value="keep">Keep both</option></select
+              <option value="keep">Keep both</option>
+              <option value="overwrite">Overwrite existing</option></select
             ><button id="clear" class="button text small" type="button">
               Clear list
             </button>

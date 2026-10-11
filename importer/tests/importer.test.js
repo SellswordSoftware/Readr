@@ -116,6 +116,123 @@ test("library capacity counts existing EPUB files and accepted additions only", 
   );
 });
 
+test("overwrite preserves matching filenames and reserves queued names", () => {
+  const rows = planQueue(
+    [
+      item("BOOK.epub"),
+      item("new.epub"),
+      item("NEW.EPUB"),
+      item("folder.epub"),
+    ],
+    [
+      { name: "book.epub", kind: "file" },
+      { name: "folder.epub", kind: "directory" },
+    ],
+    "overwrite",
+  );
+  assert.deepEqual(
+    rows.map((row) => row.destination),
+    ["book.epub", "new.epub", "new.epub", "folder.epub"],
+  );
+  assert.deepEqual(
+    rows.map((row) => row.overwrite),
+    [true, false, true, false],
+  );
+  assert.deepEqual(
+    rows.map((row) => row.status),
+    ["ready", "ready", "ready", "invalid"],
+  );
+});
+
+test("overwrite can replace books in a full library but cannot add books", async () => {
+  const { destination } = fakeDisk();
+  for (let i = 0; i < config.maxBooks; i += 1)
+    destination.entries.set(
+      `${i}.epub`,
+      new FakeFileHandle(`${i}.epub`, new Blob(["old book"])),
+    );
+  const rows = planQueue(
+    [item("0.EPUB"), item("new.epub")],
+    await listEntries(destination),
+    "overwrite",
+  );
+  assert.deepEqual(
+    rows.map((row) => row.status),
+    ["ready", "invalid"],
+  );
+  await copyFile(destination, epub(), "0.EPUB", {
+    overwrite: true,
+    chunkBytes: 3,
+  });
+  assert.deepEqual(
+    await destination.entries.get("0.epub").blob.arrayBuffer(),
+    await epub().arrayBuffer(),
+  );
+  assert.equal(destination.entries.size, config.maxBooks);
+  assert.deepEqual(destination.created, []);
+  await assert.rejects(
+    copyFile(destination, epub(), "new.epub", { overwrite: true }),
+    /full/,
+  );
+});
+
+for (const phase of ["open", "write", "close", "cancel"])
+  test(`overwrite ${phase} failure preserves the previous book`, async () => {
+    const { destination } = fakeDisk();
+    const controller = new AbortController();
+    const fail =
+      phase === "cancel"
+        ? { afterWrite: () => controller.abort() }
+        : { [phase]: new Error("Write failed") };
+    const old = new FakeFileHandle("book.epub", new Blob(["original"]), fail);
+    destination.entries.set(old.name, old);
+    await assert.rejects(
+      copyFile(destination, epub(), "book.epub", {
+        overwrite: true,
+        signal: controller.signal,
+        chunkBytes: 3,
+      }),
+    );
+    assert.equal(await old.blob.text(), "original");
+    assert.deepEqual(destination.removed, []);
+  });
+
+test("failed overwrite verification keeps the replacement and reports it", async () => {
+  const { destination } = fakeDisk();
+  const old = new FakeFileHandle("book.epub", new Blob(["original"]), {
+    corrupt: true,
+  });
+  destination.entries.set(old.name, old);
+  await assert.rejects(
+    copyFile(destination, epub(), "book.epub", { overwrite: true }),
+    (error) => {
+      assert.match(
+        error.cleanupMessage,
+        /previous book has already been overwritten/,
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(destination.removed, []);
+  assert.equal(destination.entries.get(old.name), old);
+});
+
+test("overwrite rejects folders and permits new files", async () => {
+  const { destination } = fakeDisk();
+  const folder = new FakeDirectory("book.epub");
+  destination.entries.set(folder.name, folder);
+  await assert.rejects(
+    copyFile(destination, epub(), "BOOK.epub", { overwrite: true }),
+    /appeared/,
+  );
+  assert.equal(destination.entries.get(folder.name), folder);
+  await copyFile(destination, epub(), "new.epub", { overwrite: true });
+  assert.deepEqual(
+    await destination.entries.get("new.epub").blob.arrayBuffer(),
+    await epub().arrayBuffer(),
+  );
+});
+
 test("only existing Playdate layout resolves; never create missing directories", async () => {
   const { root, destination } = fakeDisk();
   assert.equal((await resolveDestination(root)).directory, destination);

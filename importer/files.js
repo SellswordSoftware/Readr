@@ -32,7 +32,7 @@ export async function fileError(file) {
 }
 
 export function planQueue(items, entries, policy = "skip") {
-  const used = new Set(entries.map((entry) => nameKey(entry.name)));
+  const used = new Map(entries.map((entry) => [nameKey(entry.name), entry]));
   let count = entries.filter(
     (entry) => entry.kind === "file" && isEpub(entry.name),
   ).length;
@@ -42,6 +42,7 @@ export function planQueue(items, entries, policy = "skip") {
       destination: item.name,
       status: "ready",
       message: "",
+      overwrite: false,
     };
     const error = item.error || nameError(item.name);
     if (error) return { ...row, status: "invalid", message: error };
@@ -52,27 +53,40 @@ export function planQueue(items, entries, policy = "skip") {
           status: "skipped",
           message: "A file with this name already exists.",
         };
-      const stem = item.name.slice(0, -5);
-      let number = 2;
-      do {
-        row.destination = `${stem} (${number++}).epub`;
-      } while (used.has(nameKey(row.destination)));
-      if (nameError(row.destination))
-        return {
-          ...row,
-          status: "invalid",
-          message: "Shorten the filename to leave room for a numbered copy.",
-        };
-      row.message = `Copy as ${row.destination}`;
+      if (policy === "overwrite") {
+        const existing = used.get(nameKey(row.destination));
+        if (existing.kind !== "file")
+          return {
+            ...row,
+            status: "invalid",
+            message: "A folder with this name exists. Choose another filename.",
+          };
+        row.destination = existing.name;
+        row.overwrite = true;
+        row.message = `Overwrite ${row.destination}`;
+      } else {
+        const stem = item.name.slice(0, -5);
+        let number = 2;
+        do {
+          row.destination = `${stem} (${number++}).epub`;
+        } while (used.has(nameKey(row.destination)));
+        if (nameError(row.destination))
+          return {
+            ...row,
+            status: "invalid",
+            message: "Shorten the filename to leave room for a numbered copy.",
+          };
+        row.message = `Copy as ${row.destination}`;
+      }
     }
-    if (count >= config.maxBooks)
+    if (!row.overwrite && count >= config.maxBooks)
       return {
         ...row,
         status: "invalid",
         message: "readr’s library holds 255 books. This book does not fit.",
       };
-    used.add(nameKey(row.destination));
-    count += 1;
+    used.set(nameKey(row.destination), { name: row.destination, kind: "file" });
+    if (!row.overwrite) count += 1;
     return row;
   });
 }

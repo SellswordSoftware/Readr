@@ -180,6 +180,16 @@ try {
       .textContent.includes("2 books ready"),
   );
   assert.match(await page.locator("#queue").textContent(), /\(2\)\.epub/);
+  await page.locator("#duplicate-policy").selectOption("overwrite");
+  assert.match(
+    await page.locator("#queue").textContent(),
+    /Overwrite A good book.epub/,
+  );
+  assert.doesNotMatch(
+    await page.locator("#queue").textContent(),
+    /Copy as|\(2\)\.epub/,
+  );
+  await page.locator("#duplicate-policy").selectOption("keep");
   await page.getByRole("button", { name: "Copy books" }).click();
   await page.waitForFunction(() => !document.getElementById("results").hidden);
   assert.match(
@@ -224,6 +234,46 @@ try {
   await page.getByRole("button", { name: "Add more books" }).click();
   assert.equal(await page.locator("#results").isVisible(), false);
   assert.equal(await page.locator("#queue li").count(), 0);
+  await page.getByRole("button", { name: "Select drive", exact: true }).click();
+  await page.waitForFunction(
+    () => !document.getElementById("choose-files").disabled,
+  );
+  const replacementBytes = [0x50, 0x4b, 3, 4, 1, 2];
+  await page.locator("#file-input").setInputFiles({
+    name: "a GOOD book.EPUB",
+    mimeType: "application/epub+zip",
+    buffer: Buffer.from(replacementBytes),
+  });
+  await page.locator("#duplicate-policy").selectOption("overwrite");
+  await page.waitForFunction(() =>
+    document
+      .getElementById("queue-summary")
+      .textContent.includes("Matching books will be overwritten"),
+  );
+  assert.match(
+    await page.locator("#queue").textContent(),
+    /Overwrite A good book.epub/,
+  );
+  await page.getByRole("button", { name: "Copy books" }).click();
+  await page.waitForFunction(() => !document.getElementById("results").hidden);
+  assert.match(await page.locator("#result-summary").textContent(), /1 copied/);
+  assert.deepEqual(
+    await page.evaluate(async () => {
+      const destination = window.testDisk.destination;
+      return {
+        names: [...destination.entries.keys()],
+        bytes: Array.from(
+          new Uint8Array(
+            await destination.entries
+              .get("A good book.epub")
+              .blob.arrayBuffer(),
+          ),
+        ),
+      };
+    }),
+    { names, bytes: replacementBytes },
+  );
+  await page.getByRole("button", { name: "Add more books" }).click();
   await page.evaluate(() => {
     window.pickerFailure = "NotAllowedError";
   });
