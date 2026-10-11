@@ -1,0 +1,7 @@
+name=Readr
+author=Sellsword Software LLC
+description=An EPUB reader for Playdate
+bundleID=com.sellswordsoftware.readr
+version=1.0.0
+buildNumber=2
+imagePath=assets/launcher

@@ -1,0 +1,9 @@
+{
+  "name": "readr-epub-importer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/importer.test.js",
+    "test:browser": "node tests/browser.test.js"
+  }
+}

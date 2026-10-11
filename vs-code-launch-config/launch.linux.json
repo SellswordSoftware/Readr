@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Build and Launch Debug",
+            "type": "cppdbg",
+            "request": "launch",
+            "preLaunchTask": "build",
+            "program": "${env:PLAYDATE_SDK_PATH}/bin/PlaydateSimulator",
+            "args": [
+                "zig-out/example.pdx"
+            ],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

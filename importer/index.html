@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f5c842" />
+    <meta
+      name="description"
+      content="Copy EPUB books to Readr on your Playdate. No installs. Your books stay local."
+    />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src http://localhost:*/.well-known/appspecific/com.chrome.devtools.json http://127.0.0.1:*/.well-known/appspecific/com.chrome.devtools.json; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Add books · Readr</title>
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./style.css" />
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="readr importer home"
+        ><svg viewBox="0 0 32 32" aria-hidden="true">
+          <path
+            d="M5 6h9c2 0 2 2 2 2s0-2 2-2h9v20h-9c-2 0-2 2-2 2s0-2-2-2H5zM16 8v20"
+          /></svg
+        >Readr</a
+      >
+    </header>
+    <main id="main">
+      <div class="intro">
+        <h1>Your next read,<br />ready to go.</h1>
+        <p>
+          Bring your EPUB books to Playdate.<br />Connect, choose, copy. No app
+          to install.
+        </p>
+      </div>
+      <aside class="device-art" aria-hidden="true">
+        <div class="device">
+          <div class="device-screen">
+            <span>Readr</span><i></i><i></i><i></i><i></i>
+          </div>
+          <div class="controls"><b>✚</b><span>● ●</span></div>
+          <div class="crank"></div>
+        </div>
+      </aside>
+      <div class="workspace">
+        <nav class="steps" aria-label="Import steps">
+          <ol>
+            <li id="step-1" aria-current="step"><span>1</span>Connect</li>
+            <li id="step-2"><span>2</span>Choose books</li>
+            <li id="step-3"><span>3</span>Copy &amp; read</li>
+          </ol>
+        </nav>
+        <div id="capability" class="notice" hidden></div>
+        <noscript
+          ><p class="notice">
+            This importer needs JavaScript. You can also copy EPUBs manually to
+            Data/com.sellswordsoftware.readr on your Playdate.
+          </p></noscript
+        >
+        <section
+          id="panel-1"
+          class="card active-step"
+          aria-labelledby="connect-heading"
+        >
+          <div class="section-top">
+            <span class="section-number">01</span>
+            <div>
+              <h2 id="connect-heading">Make a connection</h2>
+              <p>Install and open readr once before adding books.</p>
+            </div>
+            <span id="drive-chip" class="chip">Not connected</span>
+          </div>
+          <div class="connect-grid">
+            <div>
+              <p class="instruction">
+                Connect your Playdate with a
+                <strong>data-capable USB cable</strong> and unlock it. We’ll
+                help it switch to Data Disk mode.
+              </p>
+              <div class="actions">
+                <button id="connect" class="button primary" type="button">
+                  Connect Playdate <span aria-hidden="true">↗</span></button
+                ><button id="manual" class="button text" type="button">
+                  Already in Data Disk mode
+                </button>
+              </div>
+            </div>
+            <div class="manual-help">
+              <details id="manual-details">
+                <summary>Prefer to connect manually?</summary>
+                <p>
+                  On Playdate, go to
+                  <strong>Settings → System → Reboot to Data Disk</strong>. Wait
+                  for the Playdate drive to appear on your computer, then select
+                  it below.
+                </p>
+                <p>
+                  If it doesn’t appear, try another USB cable. Close Playdate
+                  Simulator or any app using the serial connection.
+                </p>
+              </details>
+            </div>
+          </div>
+          <div id="drive-picker" class="drive-picker" hidden>
+            <div>
+              <strong>Select the Playdate drive</strong>
+              <p>Choose the top-level folder with Games and Data inside it.</p>
+            </div>
+            <button id="select-drive" class="button tonal" type="button">
+              Select drive
+            </button>
+          </div>
+          <p id="connection-message" class="inline-message" role="status"></p>
+          <p id="destination" class="destination" hidden></p>
+        </section>
+        <section id="panel-2" class="card" aria-labelledby="books-heading">
+          <div class="section-top">
+            <span class="section-number">02</span>
+            <div>
+              <h2 id="books-heading">Choose your next reads</h2>
+              <p>
+                Ordinary, DRM-free EPUBs. Your files stay exactly as they are.
+              </p>
+            </div>
+            <span id="book-count" class="chip">0 books</span>
+          </div>
+          <div id="drop-zone" class="drop-zone">
+            <svg viewBox="0 0 48 48" aria-hidden="true">
+              <path
+                d="M9 8h12c3 0 3 3 3 3s0-3 3-3h12v29H27c-3 0-3 3-3 3s0-3-3-3H9zM24 11v29"
+              />
+            </svg>
+            <h3>Drop a few good books here</h3>
+            <p>Or pick EPUB files from your computer.</p>
+            <button id="choose-files" class="button tonal" type="button">
+              Choose EPUBs</button
+            ><input
+              id="file-input"
+              type="file"
+              accept=".epub,application/epub+zip"
+              multiple
+              hidden
+            />
+          </div>
+          <div id="queue-tools" class="queue-tools" hidden>
+            <label for="duplicate-policy">When a name already exists</label
+            ><select id="duplicate-policy">
+              <option value="skip">Skip existing</option>
+              <option value="keep">Keep both</option></select
+            ><button id="clear" class="button text small" type="button">
+              Clear list
+            </button>
+          </div>
+          <ul id="queue" class="queue" aria-label="Selected books"></ul>
+          <div class="import-actions">
+            <p id="queue-summary">Select your Playdate drive to get started.</p>
+            <button id="import" class="button tonal" type="button" disabled>
+              Copy books <span aria-hidden="true">→</span>
+            </button>
+          </div>
+        </section>
+        <section
+          id="transfer"
+          class="card transfer"
+          aria-labelledby="transfer-heading"
+          hidden
+        >
+          <div class="section-top">
+            <span class="section-number">03</span>
+            <div>
+              <h2 id="transfer-heading">A little closer to your next read</h2>
+              <p id="transfer-label"></p>
+            </div>
+            <button id="cancel" class="button text" type="button">
+              Cancel
+            </button>
+          </div>
+          <progress
+            id="progress"
+            max="100"
+            value="0"
+            aria-label="Current book progress"
+          ></progress>
+          <p id="progress-detail" class="progress-detail"></p>
+          <div id="results" hidden>
+            <p id="result-summary"></p>
+            <div class="eject-note">
+              <strong>One last step: safely eject your Playdate.</strong>
+              <p>
+                Use Eject in your computer’s file manager, then exit Data Disk
+                mode and open readr. Your books will appear in the library.
+              </p>
+            </div>
+            <button id="start-over" class="button tonal" type="button">
+              Add more books
+            </button>
+          </div>
+        </section>
+        <div
+          id="announcement"
+          class="sr-only"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        ></div>
+      </div>
+      <footer>
+        <details>
+          <summary>Browser support &amp; manual copying</summary>
+          <p>
+            Use desktop Chrome or Edge for browser-assisted copying. Your
+            browser must support choosing and writing to a local folder.
+          </p>
+          <p>
+            To copy manually, enter Data Disk mode and place EPUBs directly in
+            <code>Data/com.sellswordsoftware.readr/</code>. Launch readr once
+            first so this folder exists. Eject the drive before opening readr
+            again.
+          </p>
+          <p>
+            The importer checks basic file format, not full book compatibility.
+            Encrypted or unsupported EPUBs may not open in readr.
+          </p>
+        </details>
+      </footer>
+    </main>
+  </body>
+</html>
