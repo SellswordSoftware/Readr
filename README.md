@@ -44,6 +44,18 @@ it does not measure total call-chain or SDK stack use. The default Debug build
 contains larger frames and exceeds this guard in existing reader and standard
 library code.
 
+## Reader controls
+
+In Pages or Scroll, **A** enters RSVP and **B** or **Up** returns to the Library.
+In RSVP, **B** returns to the selected Pages/Scroll presentation; **A** starts or
+pauses autoplay. Settings is accessible from the system menu. The system menu
+also shows **RSVP: On** or **RSVP: Off** while reading an open book; select it
+to toggle the reading mode.
+
+The Library scans for EPUB files at startup, whenever you enter Library, and
+after a system resume or unlock. Scanning preserves the selected book when it
+is still present; no manual refresh is needed.
+
 ## Sound
 
 Settings → Sound offers **Off**, **Subtle**, and **Full** (default). Subtle

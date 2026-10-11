@@ -127,7 +127,7 @@ pub const FrameInput = struct {
     reduce_flashing: bool = false,
 };
 
-pub const SystemAction = enum { settings, refresh_library };
+pub const SystemAction = enum { settings, toggle_reading_mode };
 const PagedSelectionMove = enum { advanced, waiting_for_page, at_limit };
 const ScrollRestoreTarget = reading_location.ScrollRestoreTarget;
 
@@ -256,7 +256,8 @@ pub const ReaderCoordinator = struct {
     }
 
     pub fn discoverLibrary(self: *ReaderCoordinator) void {
-        const files = self.host.?.files orelse return;
+        const host = self.host orelse return;
+        const files = host.files orelse return;
         // A single filename is small; the complete catalog remains heap-owned.
         const selected: ?library_storage.Book = if (self.library.selectedBook()) |book| book.* else null;
         const old_index = self.library.selected;
@@ -486,6 +487,7 @@ pub const ReaderCoordinator = struct {
         if (self.screen == screen) return;
         self.clearTransientCrank();
         self.screen = screen;
+        if (screen == .library) self.library_refresh_pending = true;
     }
 
     const CrankContext = struct {
@@ -1770,6 +1772,9 @@ pub const ReaderCoordinator = struct {
         self.performIntent(intent, now_ms);
         self.advanceStatisticsTransition(now_ms);
         self.updateResetHold(frame.a_held, frame.buttons.a, now_ms);
+        // An input action may have just entered Library. Scan before rendering its
+        // first frame, while keeping discovery out of reader teardown.
+        if (self.library_refresh_pending and self.screen == .library) self.discoverLibrary();
         // A screen-changing action can precede this frame's crank sample. That sample
         // still belongs to the previous controls.
         if (std.meta.eql(crank_context, self.crankContext())) self.handleCrank(frame.crank_change, now_ms);
@@ -1940,12 +1945,15 @@ pub const ReaderCoordinator = struct {
         self.clearTransientCrank();
     }
 
+    pub fn canToggleReadingMode(self: *const ReaderCoordinator) bool {
+        return self.screen == .reading and self.lifecycle == .ready and !self.book_loading and self.active_book.slice().len != 0;
+    }
+
     pub fn handleSystemAction(self: *ReaderCoordinator, action: SystemAction, now_ms: u32) void {
         self.frame_now_ms = now_ms;
         switch (action) {
-            .refresh_library => {
-                self.library_refresh_pending = true;
-                if (self.screen == .book_actions) self.changeScreen(.library);
+            .toggle_reading_mode => {
+                if (self.canToggleReadingMode()) self.switchReadingMode(now_ms);
             },
             .settings => {
                 if (self.screen == .reading) self.stopAutoplayAccounting(now_ms);
@@ -3061,7 +3069,7 @@ test "coordinator maps platform-free snapshots through existing input priority" 
         .screen = .reading,
         .readiness = .ready,
         .mode = .paged,
-        .buttons = .{ .b = true, .right = true },
+        .buttons = .{ .a = true, .right = true },
     }));
     try std.testing.expectEqual(input.Intent.next_chapter, intentFor(.{
         .screen = .chapter_error,
@@ -3339,6 +3347,35 @@ test "coordinator enters a rebuilt Scroll predecessor after chapter work" {
     try std.testing.expectEqual(@as(u32, 4), coordinator.paged.scrollPosition().top_page);
     try std.testing.expectEqual(@as(u16, 219), coordinator.paged.scrollPosition().offset_px);
     try std.testing.expectEqual(@as(i16, 0), coordinator.paged.scrollPosition().waiting_px);
+}
+
+test "Scroll starts building beyond the viewport before the user reaches a page boundary" {
+    var coordinator: ReaderCoordinator = undefined;
+    coordinator.initInPlace(128);
+    coordinator.screen = .reading;
+    coordinator.lifecycle = .ready;
+    coordinator.paged_presentation = .scroll;
+    var context: u8 = 0;
+    const Measure = struct {
+        fn width(_: *anyopaque, text: []const u8) usize {
+            return text.len;
+        }
+    };
+    coordinator.paged.begin(0, 384, .{ .context = &context, .width = Measure.width });
+    for (0..11) |_| try coordinator.paged.pages[0].appendLineWithMetadata("visible text", 0, 2);
+    coordinator.paged.pages[0].word_count = 22;
+    coordinator.paged.pageCompleted(0, 0);
+    for (0..11) |_| try coordinator.paged.pages[coordinator.paged.next_page].appendLineWithMetadata("buffered text", 0, 2);
+    coordinator.paged.pageCompleted(0, 0);
+    coordinator.paged.beginScroll();
+    const position = coordinator.paged.scrollPosition();
+    coordinator.update(.{ .crank_docked = true }, 0);
+    try std.testing.expectEqual(position, coordinator.paged.scrollPosition());
+    try std.testing.expectEqual(@as(u32, 0), coordinator.positionSnapshot().word_ordinal);
+    try std.testing.expect(!coordinator.paged.next_ready);
+    try std.testing.expectEqual(@as(u32, 2), coordinator.paged.slots[coordinator.paged.buildingPage()].page);
+    const view = coordinator.renderModel();
+    try std.testing.expectEqualStrings("visible text", view.scroll.window.tiles[0].page.cache.line(0));
 }
 
 test "Scroll render model borrows continuous cached page tiles" {
@@ -3627,24 +3664,29 @@ test "library refresh preserves selection by path defers during reading and repo
     coordinator.update(.{}, 0);
     try std.testing.expectEqual(@as(usize, 1), listing.calls);
     try std.testing.expect(coordinator.library_refresh_pending);
-    coordinator.screen = .library;
+    coordinator.returnToLibrary();
     coordinator.update(.{}, 1);
     try std.testing.expectEqual(@as(usize, 2), listing.calls);
     try std.testing.expectEqual(@as(u8, 2), coordinator.library.selected);
     try std.testing.expectEqualStrings("zeta.epub", coordinator.library.selectedBook().?.slice());
     try std.testing.expectEqualStrings("zeta.epub", coordinator.active_book.slice());
-    coordinator.screen = .book_actions;
-    coordinator.handleSystemAction(.refresh_library, 2);
+    try std.testing.expect(coordinator.openBookActions());
+    try std.testing.expect(coordinator.closeBookActions());
     try std.testing.expectEqual(Screen.library, coordinator.screen);
     listing.fail = true;
     coordinator.update(.{}, 2);
     try std.testing.expect(coordinator.library.listing_failed);
     try std.testing.expectEqual(@as(u8, 0), coordinator.library.len);
     listing.fail = false;
-    coordinator.handleSystemAction(.refresh_library, 3);
-    coordinator.update(.{}, 3);
+    try std.testing.expect(coordinator.openSettings());
+    try std.testing.expectEqual(@as(usize, 3), listing.calls);
+    coordinator.update(.{ .buttons = .{ .b = true } }, 3);
+    try std.testing.expectEqual(Screen.library, coordinator.screen);
     try std.testing.expectEqual(@as(u8, 3), coordinator.library.len);
     try std.testing.expect(!coordinator.library.listing_failed);
+    try std.testing.expectEqual(@as(usize, 4), listing.calls);
+    coordinator.update(.{}, 4);
+    try std.testing.expectEqual(@as(usize, 4), listing.calls);
 }
 
 test "large library models expose six rows and sidecar reads are limited to one visible book per update" {
@@ -5904,6 +5946,37 @@ test "leaving a book and navigating Library actions clears old crank motion" {
     try std.testing.expect(coordinator.closeSettings());
     coordinator.handleCrank(-1, 0);
     try std.testing.expectEqual(@as(u8, 1), coordinator.library.selected);
+}
+
+test "system RSVP toggle preserves the selected word and Pages or Scroll presentation" {
+    for ([_]PagedPresentation{ .pages, .scroll }) |presentation| {
+        var files = PauseStoreFake{};
+        var coordinator: ReaderCoordinator = undefined;
+        try initPauseTest(&coordinator, &files);
+        coordinator.paged_presentation = presentation;
+        const word = coordinator.currentPagedWordOrdinal();
+        coordinator.handleSystemAction(.toggle_reading_mode, 1);
+        try std.testing.expectEqual(ReadingMode.rsvp, coordinator.mode);
+        try std.testing.expectEqual(word, coordinator.pending_mode_word_ordinal.?);
+        try std.testing.expectEqual(word, coordinator.chapter_pump.chapter_open.?.action.rsvp_rescan.word);
+        coordinator.rsvp_reader.begin(0);
+        _ = try coordinator.rsvp_reader.feed("one two ");
+        const rsvp_word = coordinator.rsvp_reader.position().word;
+        coordinator.handleSystemAction(.toggle_reading_mode, 2);
+        try std.testing.expectEqual(ReadingMode.paged, coordinator.mode);
+        try std.testing.expectEqual(presentation, coordinator.paged_presentation);
+        try std.testing.expectEqual(rsvp_word, coordinator.chapter_pump.chapter_open.?.action.word_rescan);
+    }
+}
+
+test "system RSVP toggle does not interrupt initial book loading" {
+    var coordinator: ReaderCoordinator = undefined;
+    coordinator.initInPlace(128);
+    coordinator.screen = .reading;
+    coordinator.book_loading = true;
+    coordinator.handleSystemAction(.toggle_reading_mode, 0);
+    try std.testing.expectEqual(ReadingMode.paged, coordinator.mode);
+    try std.testing.expect(coordinator.pending_mode_word_ordinal == null);
 }
 
 test "mode presentation and sleep boundaries discard motion without changing semantic position" {

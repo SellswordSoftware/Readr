@@ -252,17 +252,13 @@ pub const PagedReader = struct {
             .{ .loading_before = scrollTopOrigin(geometry.viewport.top_y, position.offset_px, 0) });
         self.appendScrollPage(&result, top_slot, origin);
 
-        if (position.waiting_px > 0) {
-            self.appendScrollTile(&result, .{ .loading_after = advanceScrollOrigin(origin, pageExtent(geometry, &self.pages[top_slot])) });
-            return result;
-        }
-
         var page = position.top_page;
         var page_slot = top_slot;
         var page_origin = origin;
         while (result.tile_count < 3) {
             const bottom = advanceScrollOrigin(page_origin, pageExtent(geometry, &self.pages[page_slot]));
-            if (bottom >= @as(i16, @intCast(geometry.viewport.bottom_y))) break;
+            // Include a line cell beyond the clip so new text is ready offscreen.
+            if (bottom >= @as(i16, @intCast(geometry.viewport.bottom_y + geometry.line_advance))) break;
             if (self.chapter_end and self.chapter_last_page != null and page >= self.chapter_last_page.?) break;
             page += 1;
             const next_slot = self.findDrawablePage(page) orelse {
@@ -553,7 +549,11 @@ pub const PagedReader = struct {
 
     /// Cross only ready cached pages; the fixed pool bounds the loop.
     fn scrollForwardPixels(self: *PagedReader, geometry: scroll_geometry.Geometry, pixels: u16) ScrollMove {
-        var remaining = pixels;
+        const coverage = self.scrollCoverage(geometry);
+        // Stop before missing text would enter the viewport. Waiting motion is
+        // queued input, not displacement that replaces already drawable text.
+        const permitted: u16 = if (coverage.at_end) pixels else @intCast(@min(pixels, coverage.pixels -| geometry.viewport.height()));
+        var remaining = permitted;
         var crossings: usize = 0;
         while (remaining != 0 and crossings < page_capacity) {
             const current_slot = self.findDrawablePage(self.scroll_position.top_page) orelse return .waiting;
@@ -594,7 +594,31 @@ pub const PagedReader = struct {
             self.scroll_position.waiting_px = @intCast(@min(remaining, geometry.viewport.height()));
             return .waiting;
         }
+        if (permitted < pixels) {
+            self.scroll_position.waiting_px = @intCast(@min(pixels - permitted, geometry.viewport.height()));
+            return .waiting;
+        }
         return .moved;
+    }
+
+    const ScrollCoverage = struct { pixels: u32 = 0, at_end: bool = false };
+
+    fn scrollCoverage(self: *const PagedReader, geometry: scroll_geometry.Geometry) ScrollCoverage {
+        var result = ScrollCoverage{};
+        var page = self.scroll_position.top_page;
+        for (0..page_capacity) |_| {
+            const slot = self.findDrawablePage(page) orelse break;
+            const extent = pageExtent(geometry, &self.pages[slot]);
+            if (extent == 0) break;
+            result.pixels += extent;
+            if (self.chapter_end and self.chapter_last_page != null and page == self.chapter_last_page.?) {
+                result.at_end = true;
+                break;
+            }
+            page += 1;
+        }
+        result.pixels -|= self.scroll_position.offset_px;
+        return result;
     }
 
     fn scrollBackwardPixels(self: *PagedReader, geometry: scroll_geometry.Geometry, pixels: u16) ScrollMove {
@@ -1221,6 +1245,30 @@ test "pinned history slots are excluded from page-pool eviction" {
     try std.testing.expectEqual(@as(PagedReader.SlotIndex, 1), allocated);
     try std.testing.expectEqual(PagedReader.SlotRole.history, reader.slots[0].role);
     try std.testing.expectEqual(PagedReader.SlotRole.free, reader.slots[allocated].role);
+}
+
+test "Scroll holds at the cached viewport boundary without dropping the ready next page" {
+    var reader = PagedReader.init(128);
+    var context: u8 = 0;
+    const Measure = struct {
+        fn width(_: *anyopaque, text: []const u8) usize {
+            return text.len;
+        }
+    };
+    reader.begin(0, 384, .{ .context = &context, .width = Measure.width });
+    reader.pages[0].line_count = 11;
+    reader.pageCompleted(0, 0);
+    reader.pages[reader.next_page].line_count = 11;
+    reader.pageCompleted(0, 0);
+    reader.beginScroll();
+    const geometry = scroll_geometry.Geometry.init(20);
+    try std.testing.expectEqual(PagedReader.ScrollMove.waiting, reader.scrollPixels(.forward, geometry, 400));
+    try std.testing.expectEqual(@as(u32, 0), reader.scrollPosition().top_page);
+    try std.testing.expectEqual(@as(u16, 230), reader.scrollPosition().offset_px);
+    const view = reader.scrollRenderState(reader.scrollPosition(), geometry);
+    try std.testing.expect(view.tiles[1] == .page);
+    try std.testing.expectEqual(@as(i16, 5), view.tiles[1].page.origin_y);
+    try std.testing.expectEqual(@as(i16, 236), view.tiles[2].loading_after);
 }
 
 test "forward Scroll consumes ready-ahead pages and resumes the existing builder" {

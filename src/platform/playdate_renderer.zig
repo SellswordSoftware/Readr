@@ -149,14 +149,18 @@ pub const Renderer = struct {
     fn fontTextWidth(self: *const Renderer, font: *pdapi.LCDFont, value: []const u8) c_int {
         var buffer: [pagination.max_cached_line_bytes]u8 = undefined;
         const display = self.displayText(font, value, &buffer);
-        return @intCast(self.playdate.graphics.getTextWidth(font, display.ptr, display.len, .UTF8Encoding, 0));
+        // The SDK length is decoded codepoints, not UTF-8 bytes. These borrowed
+        // slices need not have a NUL terminator.
+        const count = std.unicode.utf8CountCodepoints(display) catch unreachable;
+        return @intCast(self.playdate.graphics.getTextWidth(font, display.ptr, count, .UTF8Encoding, 0));
     }
 
     fn drawFontText(self: *Renderer, font: *pdapi.LCDFont, value: []const u8, x: c_int, y: c_int) void {
         var buffer: [pagination.max_cached_line_bytes]u8 = undefined;
         const display = self.displayText(font, value, &buffer);
         self.playdate.graphics.setFont(font);
-        _ = self.playdate.graphics.drawText(display.ptr, display.len, .UTF8Encoding, x, y);
+        const count = std.unicode.utf8CountCodepoints(display) catch unreachable;
+        _ = self.playdate.graphics.drawText(display.ptr, count, .UTF8Encoding, x, y);
     }
 
     pub fn readingFontHeight(self: *const Renderer, font: reader_view.ReadingFont) usize {
@@ -421,7 +425,7 @@ pub const Renderer = struct {
         self.playdate.graphics.fillRect(0, header_offset, @intCast(reader_layout.screen_width), 36, solidColor(self.backgroundColor()));
         self.playdate.graphics.setDrawMode(self.textDrawMode());
         var status_buffer: [96]u8 = undefined;
-        const heading = if (view.listing_failed) "Library scan failed - Refresh library" else if (view.omitted_capacity != 0 or view.omitted_names != 0)
+        const heading = if (view.listing_failed) "Library scan failed" else if (view.omitted_capacity != 0 or view.omitted_names != 0)
             std.fmt.bufPrint(&status_buffer, "Library {d}: {d} limit, {d} names skipped", .{ view.count, view.omitted_capacity, view.omitted_names }) catch "Library: books omitted"
         else
             "Readr Library";
@@ -457,7 +461,7 @@ pub const Renderer = struct {
         self.centeredUiTextWithOffset(if (listing_failed) "Library scan failed" else "No books found", sheet_y + 16, true, x_offset);
         self.emphasizedText(if (long_names) "EPUB names: at most 127 bytes" else "Place .epub files in:", sheet_x + 24, sheet_y + 57);
         self.emphasizedText("Data/com.sellswordsoftware.readr", sheet_x + 24, sheet_y + 80);
-        self.emphasizedText("System menu: Refresh library", sheet_x + 24, sheet_y + 103);
+        self.emphasizedText("Library scans automatically", sheet_x + 24, sheet_y + 103);
     }
 
     fn drawBookActions(self: *Renderer, view: *const reader_view.BookActionsView, library_entrance_progress: u16, now_ms: u32) void {

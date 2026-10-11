@@ -48,6 +48,11 @@ const Fake = struct {
     fn rect(_: c_int, _: c_int, _: c_int, _: c_int, _: pdapi.LCDColor) callconv(.c) void {}
     fn clip(_: c_int, _: c_int, _: c_int, _: c_int) callconv(.c) void {}
     fn noArgs() callconv(.c) void {}
+    fn addMenu(_: ?[*:0]const u8, _: ?pdapi.PDMenuItemCallbackFunction, _: ?*anyopaque) callconv(.c) ?*pdapi.PDMenuItem {
+        return @ptrFromInt(4);
+    }
+    fn removeMenu(_: ?*pdapi.PDMenuItem) callconv(.c) void {}
+    fn menuTitle(_: ?*pdapi.PDMenuItem, _: ?[*:0]const u8) callconv(.c) void {}
     fn roundRect(_: c_int, _: c_int, _: c_int, _: c_int, _: c_int, _: pdapi.LCDColor) callconv(.c) void {}
     fn outlineRoundRect(_: c_int, _: c_int, _: c_int, _: c_int, _: c_int, _: c_int, _: pdapi.LCDColor) callconv(.c) void {}
 
@@ -63,6 +68,9 @@ const Fake = struct {
         system.getCrankChange = crank;
         system.isCrankDocked = yes;
         system.getReduceFlashing = yes;
+        system.addMenuItem = addMenu;
+        system.removeMenuItem = removeMenu;
+        system.setMenuItemTitle = menuTitle;
         graphics.* = undefined;
         graphics.clear = clear;
         graphics.setBackgroundColor = background;
@@ -84,6 +92,8 @@ const Fake = struct {
         api.graphics = graphics;
         allocator.* = Allocator.init(system);
         app.playdate = api;
+        app.rsvp_menu = null;
+        app.rsvp_menu_mode = mode_value;
         app.audio = null;
         app.sound_policy = .{};
         app.sound_batch = .{};

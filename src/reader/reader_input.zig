@@ -87,14 +87,14 @@ pub fn intentFor(snapshot: Snapshot) Intent {
         return .none;
     }
     if (snapshot.screen == .reading) {
-        if (snapshot.buttons.b) return .toggle_reading_mode;
+        if (snapshot.buttons.b) return if (snapshot.mode == .rsvp) .toggle_reading_mode else .return_to_library;
         if (snapshot.mode == .rsvp) {
             if (snapshot.buttons.up) return .rsvp_wpm_up;
             if (snapshot.buttons.down) return .rsvp_wpm_down;
         }
         if (snapshot.buttons.up) return .return_to_library;
         if (snapshot.buttons.down) return .open_statistics;
-        if (snapshot.mode == .paged and snapshot.buttons.a) return .open_settings;
+        if (snapshot.mode == .paged and snapshot.buttons.a) return .toggle_reading_mode;
     }
     if (snapshot.screen == .library) {
         if (snapshot.buttons.down or snapshot.buttons.right) return .library_next;
@@ -138,7 +138,7 @@ test "Paged reading reserves Up and Down for library and statistics" {
     snapshot.buttons = .{ .down = true };
     try std.testing.expectEqual(Intent.open_statistics, intentFor(snapshot));
     snapshot.buttons = .{ .a = true };
-    try std.testing.expectEqual(Intent.open_settings, intentFor(snapshot));
+    try std.testing.expectEqual(Intent.toggle_reading_mode, intentFor(snapshot));
     snapshot.mode = .rsvp;
     snapshot.buttons = .{ .a = true };
     try std.testing.expectEqual(Intent.rsvp_toggle_autoplay, intentFor(snapshot));
@@ -162,9 +162,24 @@ test "reading gives the mode toggle priority over page navigation" {
         .screen = .reading,
         .readiness = .ready,
         .mode = .paged,
-        .buttons = .{ .b = true, .right = true },
+        .buttons = .{ .a = true, .right = true },
     });
     try std.testing.expectEqual(Intent.toggle_reading_mode, intent);
+}
+
+test "Pages and Scroll use A for RSVP and B or Up for Library" {
+    for ([_]PagedPresentation{ .pages, .scroll }) |presentation| {
+        var snapshot = Snapshot{ .screen = .reading, .readiness = .ready, .mode = .paged, .paged_presentation = presentation, .buttons = .{} };
+        snapshot.buttons = .{ .a = true };
+        try std.testing.expectEqual(Intent.toggle_reading_mode, intentFor(snapshot));
+        for ([_]Buttons{ .{ .b = true }, .{ .up = true }, .{ .b = true, .a = true, .right = true } }) |buttons| {
+            snapshot.buttons = buttons;
+            try std.testing.expectEqual(Intent.return_to_library, intentFor(snapshot));
+        }
+        snapshot.mode = .rsvp;
+        snapshot.buttons = .{ .b = true, .a = true, .right = true };
+        try std.testing.expectEqual(Intent.toggle_reading_mode, intentFor(snapshot));
+    }
 }
 
 test "settings consumes its own controls before reader navigation" {

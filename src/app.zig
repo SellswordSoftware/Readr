@@ -35,7 +35,8 @@ pub const App = struct {
     // Progress indexing owns an independent stream and decoder workspace.
     progress_file: ?PlaydateFileReader = null,
     settings_menu: ?*pdapi.PDMenuItem = null,
-    refresh_menu: ?*pdapi.PDMenuItem = null,
+    rsvp_menu: ?*pdapi.PDMenuItem = null,
+    rsvp_menu_mode: reader_coordinator.ReadingMode = .paged,
 
     pub fn init(playdate: *pdapi.PlaydateAPI, allocator: *PlaydateAllocator) !*App {
         comptime {
@@ -83,7 +84,8 @@ pub const App = struct {
         app.prefetch_file = null;
         app.progress_file = null;
         app.settings_menu = null;
-        app.refresh_menu = null;
+        app.rsvp_menu = null;
+        app.rsvp_menu_mode = .paged;
         if (!playdate_persistence.ensureDataRoot(playdate.file)) return error.DataFolderUnavailable;
         app.coordinator.initInPlace(reader_coordinator.default_checkpoint_byte_budget);
         app.coordinator.attachAllocator(allocator.allocator());
@@ -113,6 +115,7 @@ pub const App = struct {
             .crank_docked = self.playdate.system.isCrankDocked() != 0,
             .reduce_flashing = self.playdate.system.getReduceFlashing() != 0,
         }, started_at);
+        self.syncRsvpMenu();
 
         defer self.playSoundEvents(started_at);
         self.coordinator.renderModelInto(&self.render_model);
@@ -179,7 +182,27 @@ pub const App = struct {
 
     fn installSystemMenu(self: *App) void {
         self.settings_menu = self.playdate.system.addMenuItem("Settings", settingsMenuSelected, self);
-        self.refresh_menu = self.playdate.system.addMenuItem("Refresh library", refreshMenuSelected, self);
+        self.syncRsvpMenu();
+    }
+
+    fn rsvpMenuTitle(self: *const App) [*:0]const u8 {
+        return if (self.coordinator.mode == .rsvp) "RSVP: On" else "RSVP: Off";
+    }
+
+    fn syncRsvpMenu(self: *App) void {
+        if (!self.coordinator.canToggleReadingMode()) {
+            if (self.rsvp_menu) |item| self.playdate.system.removeMenuItem(item);
+            self.rsvp_menu = null;
+            return;
+        }
+        if (self.rsvp_menu == null) {
+            self.rsvp_menu = self.playdate.system.addMenuItem(self.rsvpMenuTitle(), rsvpMenuSelected, self);
+            self.rsvp_menu_mode = self.coordinator.mode;
+            return;
+        }
+        if (self.rsvp_menu_mode == self.coordinator.mode) return;
+        if (self.rsvp_menu) |item| self.playdate.system.setMenuItemTitle(item, self.rsvpMenuTitle());
+        self.rsvp_menu_mode = self.coordinator.mode;
     }
 
     fn closeOpeningFile(self: *App) void {
@@ -264,17 +287,100 @@ fn settingsMenuSelected(userdata: ?*anyopaque) callconv(.c) void {
     const app: *App = @ptrCast(@alignCast(userdata orelse return));
     app.coordinator.reduce_flashing = app.playdate.system.getReduceFlashing() != 0;
     app.coordinator.handleSystemAction(.settings, app.playdate.system.getCurrentTimeMilliseconds());
+    app.syncRsvpMenu();
 }
 
-fn refreshMenuSelected(userdata: ?*anyopaque) callconv(.c) void {
+fn rsvpMenuSelected(userdata: ?*anyopaque) callconv(.c) void {
     const app: *App = @ptrCast(@alignCast(userdata orelse return));
-    app.coordinator.handleSystemAction(.refresh_library, app.playdate.system.getCurrentTimeMilliseconds());
+    app.coordinator.handleSystemAction(.toggle_reading_mode, app.playdate.system.getCurrentTimeMilliseconds());
+    app.syncRsvpMenu();
 }
 
 fn collectLibraryPath(path: ?[*:0]const u8, userdata: ?*anyopaque) callconv(.c) void {
     const library: *reader_host.Library = @ptrCast(@alignCast(userdata orelse return));
     const z_path = path orelse return;
     library.add(std.mem.span(z_path));
+}
+
+test "RSVP system menu is reader-only and follows mode changes" {
+    const FakeMenu = struct {
+        var item_count: usize = 0;
+        var title: []const u8 = "";
+        var callback: ?pdapi.PDMenuItemCallbackFunction = null;
+        var context: ?*anyopaque = null;
+        fn add(label: ?[*:0]const u8, selected: ?pdapi.PDMenuItemCallbackFunction, userdata: ?*anyopaque) callconv(.c) ?*pdapi.PDMenuItem {
+            item_count += 1;
+            title = std.mem.span(label.?);
+            callback = selected;
+            context = userdata;
+            return @ptrFromInt(4);
+        }
+        fn setTitle(_: ?*pdapi.PDMenuItem, label: ?[*:0]const u8) callconv(.c) void {
+            title = std.mem.span(label.?);
+        }
+        fn remove(_: ?*pdapi.PDMenuItem) callconv(.c) void {
+            item_count -= 1;
+        }
+        fn clock() callconv(.c) u32 {
+            return 10;
+        }
+    };
+    const app = try std.testing.allocator.create(App);
+    defer std.testing.allocator.destroy(app);
+    var system: pdapi.PlaydateSys = undefined;
+    system.addMenuItem = FakeMenu.add;
+    system.setMenuItemTitle = FakeMenu.setTitle;
+    system.removeMenuItem = FakeMenu.remove;
+    system.getCurrentTimeMilliseconds = FakeMenu.clock;
+    var api: pdapi.PlaydateAPI = undefined;
+    api.system = &system;
+    app.playdate = &api;
+    app.rsvp_menu = null;
+    app.rsvp_menu_mode = .paged;
+    app.coordinator.initInPlace(128);
+    FakeMenu.item_count = 0;
+    app.installSystemMenu();
+    try std.testing.expectEqual(@as(usize, 1), FakeMenu.item_count);
+    try std.testing.expect(app.rsvp_menu == null);
+    _ = app.coordinator.library.add("book.epub");
+    _ = app.coordinator.selectBook();
+    app.coordinator.screen = .book_actions;
+    app.syncRsvpMenu();
+    try std.testing.expect(app.rsvp_menu == null);
+    app.coordinator.screen = .reading;
+    app.coordinator.lifecycle = .ready;
+    app.coordinator.book_session.publication.spine_len = 1;
+    app.coordinator.book_loading = true;
+    app.syncRsvpMenu();
+    try std.testing.expect(app.rsvp_menu == null);
+    app.coordinator.book_loading = false;
+    app.syncRsvpMenu();
+    try std.testing.expectEqual(@as(usize, 2), FakeMenu.item_count);
+    try std.testing.expectEqualStrings("RSVP: Off", FakeMenu.title);
+    FakeMenu.callback.?(FakeMenu.context);
+    try std.testing.expectEqual(reader_coordinator.ReadingMode.rsvp, app.coordinator.mode);
+    try std.testing.expectEqualStrings("RSVP: On", FakeMenu.title);
+    FakeMenu.callback.?(FakeMenu.context);
+    try std.testing.expectEqual(reader_coordinator.ReadingMode.paged, app.coordinator.mode);
+    try std.testing.expectEqualStrings("RSVP: Off", FakeMenu.title);
+    app.coordinator.toggleMode();
+    app.syncRsvpMenu();
+    try std.testing.expectEqualStrings("RSVP: On", FakeMenu.title);
+    for ([_]reader_coordinator.Screen{ .library, .book_actions, .settings, .statistics, .chapter_browser, .opening }) |screen| {
+        app.coordinator.screen = screen;
+        app.syncRsvpMenu();
+        try std.testing.expect(app.rsvp_menu == null);
+        try std.testing.expectEqual(@as(usize, 1), FakeMenu.item_count);
+    }
+    app.coordinator.screen = .library;
+    FakeMenu.callback.?(FakeMenu.context);
+    try std.testing.expectEqual(reader_coordinator.ReadingMode.rsvp, app.coordinator.mode);
+    app.coordinator.screen = .reading;
+    app.syncRsvpMenu();
+    try std.testing.expectEqual(@as(usize, 2), FakeMenu.item_count);
+    try std.testing.expectEqualStrings("RSVP: On", FakeMenu.title);
+    app.syncRsvpMenu();
+    try std.testing.expectEqual(@as(usize, 2), FakeMenu.item_count);
 }
 
 test "SDK library discovery reports listing errors and requests only the top-level visible files" {
