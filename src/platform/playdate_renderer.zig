@@ -986,6 +986,8 @@ pub const Renderer = struct {
         // Moving forward lifts the chapter; moving backward at its start
         // lowers it and reveals the continuation affordance above.
         const overscroll: i32 = @as(i32, @intCast(view.chapter_end_overscroll_px)) - @as(i32, @intCast(view.chapter_start_overscroll_px));
+        var loading_before = false;
+        var loading_after = false;
         for (view.window.tiles[0..view.window.tile_count]) |tile| switch (tile) {
             .page => |page| {
                 for (0..page.cache.line_count) |line_index| {
@@ -994,15 +996,20 @@ pub const Renderer = struct {
                         self.readingText(font, page.cache.line(line_index), @intCast(reader_layout.text_x), @intCast(y));
                 }
             },
-            .loading_before, .loading_after, .unavailable_before, .unavailable_after => |origin_y| {
-                const last_y: i32 = @intCast(reader_layout.screen_height - reader_layout.reserved_edge_rows - font_height);
-                const y = std.math.clamp(@as(i32, origin_y) - overscroll, @as(i32, reader_layout.text_y), last_y);
-                self.text("...", @intCast(reader_layout.text_x), @intCast(y));
-            },
+            .loading_before, .unavailable_before => loading_before = true,
+            .loading_after, .unavailable_after => |origin_y| loading_after = @as(i32, origin_y) - overscroll <= top + height,
         };
         self.playdate.graphics.setClipRect(0, 0, @intCast(reader_layout.screen_width), @intCast(reader_layout.screen_height));
+        // Three small dots in the left gutter cannot overwrite a glyph or force
+        // an offscreen placeholder into the last visible line.
+        if (loading_before) self.drawScrollLoadingIndicator(top + 1);
+        if (loading_after) self.drawScrollLoadingIndicator(top + height - 2);
         if (view.chapter_start_overscroll_px >= 24) self.text("Keep turning to go back", 120, 12);
         if (view.chapter_end_overscroll_px >= 24) self.text("Keep turning to continue", 112, 216);
+    }
+
+    fn drawScrollLoadingIndicator(self: *Renderer, y: c_int) void {
+        for ([_]c_int{ 1, 3, 5 }) |x| self.playdate.graphics.fillRect(x, y, 1, 1, solidColor(self.foregroundColor()));
     }
 
     fn drawProgressRails(
@@ -1323,6 +1330,48 @@ fn fontName(font: reader_view.ReadingFont) []const u8 {
         .espy_sans_5 => "Espy Sans 5",
         .literata_36pt_medium_30 => "Literata 30 Medium",
     };
+}
+
+test "Scroll loading indicators never draw over cached text" {
+    const Fake = struct {
+        var text_calls: usize = 0;
+        var margin_dots: usize = 0;
+        fn font(_: ?*pdapi.LCDFont) callconv(.c) void {}
+        fn height(_: ?*pdapi.LCDFont) callconv(.c) u8 {
+            return 20;
+        }
+        fn clip(_: c_int, _: c_int, _: c_int, _: c_int) callconv(.c) void {}
+        fn text(_: ?*const anyopaque, _: usize, _: pdapi.PDStringEncoding, _: c_int, _: c_int) callconv(.c) c_int {
+            text_calls += 1;
+            return 1;
+        }
+        fn rect(x: c_int, _: c_int, width: c_int, height_value: c_int, _: pdapi.LCDColor) callconv(.c) void {
+            std.debug.assert(x >= 0 and x + width <= reader_layout.text_x and height_value == 1);
+            margin_dots += 1;
+        }
+    };
+    var graphics: pdapi.PlaydateGraphics = undefined;
+    graphics.setFont = Fake.font;
+    graphics.getFontHeight = Fake.height;
+    graphics.setClipRect = Fake.clip;
+    graphics.drawText = Fake.text;
+    graphics.fillRect = Fake.rect;
+    var api: pdapi.PlaydateAPI = undefined;
+    api.graphics = &graphics;
+    var renderer: Renderer = undefined;
+    const face: *pdapi.LCDFont = @ptrFromInt(4);
+    renderer.initInPlace(&api, face, face, face, face, face, face, face, face, face, face, face);
+    var page = pagination.PageCache{};
+    for (0..11) |_| try page.appendLine("visible text");
+    var view = reader_view.ScrollView{ .window = .{}, .progress_visibility = .off };
+    view.window.tiles[0] = .{ .page = .{ .cache = &page, .origin_y = 4 } };
+    view.window.tiles[1] = .{ .loading_after = 235 };
+    view.window.tile_count = 2;
+    Fake.text_calls = 0;
+    Fake.margin_dots = 0;
+    renderer.drawScroll(&view);
+    try std.testing.expectEqual(@as(usize, 11), Fake.text_calls);
+    try std.testing.expectEqual(@as(usize, 3), Fake.margin_dots);
 }
 
 test "page bands submit only intersecting font cells in both directions" {

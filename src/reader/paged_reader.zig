@@ -245,7 +245,14 @@ pub const PagedReader = struct {
         };
 
         const waiting_before: u16 = if (position.waiting_px < 0) @intCast(-@as(i32, position.waiting_px)) else 0;
-        const origin = scrollTopOrigin(geometry.viewport.top_y, position.offset_px, waiting_before);
+        // Queued backward input must not push visible lines down. A short EOF
+        // tail can still need explicit bottom-alignment padding until history is
+        // reconstructed; that padding is independent of queued crank motion.
+        const end_padding: u16 = if (waiting_before != 0 and self.chapter_end) blk: {
+            const end = self.chapterEndPosition(geometry) orelse break :blk 0;
+            break :blk if (end.top_page == position.top_page and end.waiting_px < 0) @intCast(-@as(i32, end.waiting_px)) else 0;
+        } else 0;
+        const origin = scrollTopOrigin(geometry.viewport.top_y, position.offset_px, end_padding);
         if (waiting_before != 0) self.appendScrollTile(&result, if (self.scroll_previous_unavailable)
             .{ .unavailable_before = scrollTopOrigin(geometry.viewport.top_y, position.offset_px, 0) }
         else
@@ -370,11 +377,34 @@ pub const PagedReader = struct {
 
     /// Transfer Scroll's first visible word using cached pages only.
     pub fn showScrollTopPage(self: *PagedReader) bool {
-        return self.showCachedPage(self.scroll_position.top_page);
+        if (!self.showCachedPage(self.scroll_position.top_page)) return false;
+        self.navigation_state.viewing_cached_history = self.page_index < self.navigation_state.stream_front;
+        return true;
     }
 
     pub fn scrollPosition(self: *const PagedReader) scroll_geometry.Position {
         return self.scroll_position;
+    }
+
+    /// Park the decoding frontier ahead of the viewport, using the existing history
+    /// pool. Promoting a ready page here never moves Scroll's semantic position.
+    pub fn prepareScrollAhead(self: *PagedReader, geometry: scroll_geometry.Geometry) void {
+        if (!self.next_ready or self.builder == null or self.chapter_end or self.reconstructing or self.rescan != .none) return;
+        const coverage = self.scrollCoverage(geometry);
+        const target = @as(u32, geometry.viewport.height()) * 2 + geometry.line_advance;
+        if (coverage.pixels >= target) return;
+        // Allocation must not evict visible history, including a page exposed by
+        // this frame's crank sample before the renderer gets to pin it.
+        _ = self.scrollRenderState(self.scroll_position, geometry);
+        if (self.scroll_position.top_page != 0) {
+            if (self.findDrawablePage(self.scroll_position.top_page - 1)) |slot| self.scroll_pins[slot] = true;
+        }
+        _ = self.nextPage();
+    }
+
+    pub fn scrollViewportReady(self: *const PagedReader, geometry: scroll_geometry.Geometry) bool {
+        const coverage = self.scrollCoverage(geometry);
+        return coverage.at_end or coverage.pixels >= geometry.viewport.height();
     }
 
     pub fn queueScrollDetents(self: *PagedReader, detents: i16) void {
@@ -482,6 +512,11 @@ pub const PagedReader = struct {
     pub fn resumeScrollBackward(self: *PagedReader, geometry: scroll_geometry.Geometry) ScrollMove {
         if (self.scroll_position.waiting_px >= 0) return .moved;
         return self.scrollBackwardDetent(geometry);
+    }
+
+    pub fn resumeScrollForward(self: *PagedReader, geometry: scroll_geometry.Geometry) ScrollMove {
+        if (self.scroll_position.waiting_px <= 0) return .moved;
+        return self.scrollForwardRequested(geometry, 0);
     }
 
     /// Bottom-align the verified ending. Missing history becomes placeholder space, not
@@ -1231,7 +1266,7 @@ test "scroll window describes missing sides without copying or constructing text
         else => return error.TestUnexpectedResult,
     }
     switch (before.tiles[1]) {
-        .page => |tile| try std.testing.expectEqual(@as(i16, 16), tile.origin_y),
+        .page => |tile| try std.testing.expectEqual(@as(i16, 215), tile.origin_y),
         else => return error.TestUnexpectedResult,
     }
 }
@@ -1245,6 +1280,19 @@ test "pinned history slots are excluded from page-pool eviction" {
     try std.testing.expectEqual(@as(PagedReader.SlotIndex, 1), allocated);
     try std.testing.expectEqual(PagedReader.SlotRole.history, reader.slots[0].role);
     try std.testing.expectEqual(PagedReader.SlotRole.free, reader.slots[allocated].role);
+}
+
+test "backward Scroll keeps cached text stationary while its predecessor is reconstructed" {
+    var reader = PagedReader.init(128);
+    reader.pages[0].line_count = 11;
+    reader.pages[1].line_count = 11;
+    reader.slots[0] = .{ .role = .displayed, .page = 1 };
+    reader.slots[1] = .{ .role = .history, .page = 2 };
+    reader.scroll_position = .{ .top_page = 1 };
+    const geometry = scroll_geometry.Geometry.init(20);
+    try std.testing.expectEqual(PagedReader.ScrollMove.needs_reconstruction, reader.scrollPixels(.backward, geometry, 12));
+    const view = reader.scrollRenderState(reader.scrollPosition(), geometry);
+    try std.testing.expectEqual(@as(i16, 4), view.tiles[1].page.origin_y);
 }
 
 test "Scroll holds at the cached viewport boundary without dropping the ready next page" {
@@ -1271,7 +1319,7 @@ test "Scroll holds at the cached viewport boundary without dropping the ready ne
     try std.testing.expectEqual(@as(i16, 236), view.tiles[2].loading_after);
 }
 
-test "forward Scroll consumes ready-ahead pages and resumes the existing builder" {
+test "forward Scroll crosses cached pages while decoding stays ahead of the viewport" {
     var reader = PagedReader.init(3 * @sizeOf(cache_policy.Entry));
     var context: u8 = 0;
     reader.begin(0, 10, .{ .context = &context, .width = struct {
@@ -1286,6 +1334,10 @@ test "forward Scroll consumes ready-ahead pages and resumes the existing builder
     reader.pages[reader.next_page].line_count = 11;
     reader.pageCompleted(0, 0);
     reader.beginScroll();
+    reader.prepareScrollAhead(scroll_geometry.Geometry.init(20));
+    reader.pages[reader.next_page] = makePage(2, 1);
+    reader.pages[reader.next_page].line_count = 11;
+    reader.pageCompleted(0, 0);
     reader.scroll_position.offset_px = 225;
     reader.queueScrollDetents(1);
 
@@ -1294,7 +1346,7 @@ test "forward Scroll consumes ready-ahead pages and resumes the existing builder
     try std.testing.expectEqual(@as(u32, 1), reader.scrollPosition().top_page);
     try std.testing.expectEqual(@as(u16, 6), reader.scrollPosition().offset_px);
     try std.testing.expectEqual(PagedReader.SlotRole.history, reader.slots[reader.findCachedPage(0).?].role);
-    try std.testing.expectEqual(PagedReader.SlotRole.building, reader.slots[reader.next_page].role);
+    try std.testing.expectEqual(PagedReader.SlotRole.ready_ahead, reader.slots[reader.next_page].role);
 }
 
 test "fast forward Scroll input waits once then drains a bounded backlog" {
@@ -1308,21 +1360,53 @@ test "fast forward Scroll input waits once then drains a bounded backlog" {
     reader.pages[0] = makePage(0, 1);
     reader.pages[0].line_count = 11;
     reader.pageCompleted(0, 0);
+    reader.pages[reader.next_page] = makePage(1, 1);
+    reader.pages[reader.next_page].line_count = 11;
+    reader.pageCompleted(0, 0);
     reader.beginScroll();
+    reader.prepareScrollAhead(scroll_geometry.Geometry.init(20));
     reader.scroll_position.offset_px = 225;
     reader.queueScrollDetents(100);
 
     try std.testing.expectEqual(PagedReader.ScrollMove.waiting, reader.drainScrollForward(scroll_geometry.Geometry.init(20)));
-    try std.testing.expectEqual(@as(i16, 6), reader.scrollPosition().waiting_px);
+    try std.testing.expectEqual(@as(i16, 7), reader.scrollPosition().waiting_px);
+    try std.testing.expectEqual(@as(u16, 230), reader.scrollPosition().offset_px);
     try std.testing.expectEqual(@as(i16, 63), reader.scrollPosition().pending_detents);
 
-    reader.pages[reader.next_page] = makePage(1, 1);
+    reader.pages[reader.next_page] = makePage(2, 1);
     reader.pages[reader.next_page].line_count = 11;
     reader.pageCompleted(0, 0);
     try std.testing.expectEqual(PagedReader.ScrollMove.moved, reader.drainScrollForward(scroll_geometry.Geometry.init(20)));
     try std.testing.expectEqual(@as(u32, 1), reader.scrollPosition().top_page);
     try std.testing.expectEqual(@as(i16, 55), reader.scrollPosition().pending_detents);
     try std.testing.expectEqual(@as(u16, 102), reader.scrollPosition().offset_px);
+}
+
+test "switching buffered Scroll to Pages visits cached words before rejoining the decoder" {
+    var reader = PagedReader.init(128);
+    var context: u8 = 0;
+    const Measure = struct {
+        fn width(_: *anyopaque, text: []const u8) usize {
+            return text.len;
+        }
+    };
+    reader.begin(0, 384, .{ .context = &context, .width = Measure.width });
+    for (0..2) |page| {
+        reader.pages[reader.buildingPage()] = makePage(@intCast(page), 1);
+        reader.pages[reader.buildingPage()].line_count = 11;
+        reader.pageCompleted(0, 0);
+    }
+    reader.beginScroll();
+    reader.prepareScrollAhead(scroll_geometry.Geometry.init(20));
+    reader.pages[reader.buildingPage()] = makePage(2, 1);
+    reader.pages[reader.buildingPage()].line_count = 11;
+    reader.pageCompleted(0, 0);
+    try std.testing.expect(reader.showScrollTopPage());
+    try std.testing.expectEqual(@as(u32, 0), reader.current().?.first_word_ordinal);
+    try std.testing.expectEqual(PagedReader.Move.moved, reader.nextPage());
+    try std.testing.expectEqual(@as(u32, 1), reader.current().?.first_word_ordinal);
+    try std.testing.expectEqual(PagedReader.Move.moved, reader.nextPage());
+    try std.testing.expectEqual(@as(u32, 2), reader.current().?.first_word_ordinal);
 }
 
 test "Scroll EOF bottom clamp uses cached history or loading-before space" {

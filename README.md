@@ -56,6 +56,10 @@ The Library scans for EPUB files at startup, whenever you enter Library, and
 after a system resume or unlock. Scanning preserves the selected book when it
 is still present; no manual refresh is needed.
 
+Scroll prepares completed pages beyond the viewport using the existing cache.
+If decoding falls behind, motion waits at the available-text boundary and resumes
+when text is ready. Small loading dots appear in the left margin.
+
 ## Sound
 
 Settings → Sound offers **Off**, **Subtle**, and **Full** (default). Subtle

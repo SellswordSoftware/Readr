@@ -1788,9 +1788,13 @@ pub const ReaderCoordinator = struct {
             self.openChapter(chapter, .normal);
             self.restorePosition();
         }
+        if (self.mode == .paged and self.paged_presentation == .scroll and self.paged.pending_selection == null) {
+            self.paged.prepareScrollAhead(self.scrollGeometry());
+        }
         const chapter = self.stepChapter(now_ms);
         if (chapter.position_changed) self.requestPositionSave();
         self.resumeScrollBackwardAfterChapterWork(chapter.worked);
+        self.resumeScrollForwardAfterChapterWork(chapter.worked, now_ms);
         if (chapter.request_prefetch) _ = self.startPrefetch();
         self.fulfillPendingPagedSelection();
         self.resolveScrollRestoreBarrier();
@@ -1856,6 +1860,7 @@ pub const ReaderCoordinator = struct {
         }
         const has_text = if (self.mode == .paged) self.paged.current_ready else self.rsvp_reader.hasWord();
         if (builtin.is_test and has_text) self.telemetry.loading.textAvailable(self.clockMilliseconds());
+        if (self.mode == .paged and self.paged_presentation == .scroll and !self.paged.scrollViewportReady(self.scrollGeometry())) return;
         if (has_text and self.chapter_pump.chapter_open == null and !self.chapterIsReconstructing() and self.paged.pending_selection == null and self.scroll_restore_pending == null and self.pending_mode_word_ordinal == null) {
             self.book_loading = false;
             if (builtin.is_test) self.telemetry.loading.destinationReady(self.clockMilliseconds());
@@ -2392,6 +2397,14 @@ pub const ReaderCoordinator = struct {
         }
     }
 
+    fn resumeScrollForwardAfterChapterWork(self: *ReaderCoordinator, worked: bool, now_ms: u32) void {
+        if (!worked or self.screen != .reading or self.lifecycle != .ready or self.mode != .paged or self.paged_presentation != .scroll or self.paged.scrollPosition().waiting_px <= 0) return;
+        const anchor = self.visibleManualPaceAnchor();
+        const before = self.currentPagedWordOrdinal();
+        self.handleScrollMove(self.paged.resumeScrollForward(self.scrollGeometry()));
+        self.recordScrollForward(anchor, before, now_ms);
+    }
+
     fn drainScrollDetents(self: *ReaderCoordinator, now_ms: u32) void {
         if (self.screen != .reading or self.mode != .paged or self.paged_presentation != .scroll or self.lifecycle != .ready or self.chapter_pump.chapter_open != null) return;
         const pending_detents = self.paged.scrollPosition().pending_detents;
@@ -2411,6 +2424,7 @@ pub const ReaderCoordinator = struct {
     fn recordScrollForward(self: *ReaderCoordinator, anchor: ?reading_pace.ManualAnchor, before: u32, now_ms: u32) void {
         const after = self.currentPagedWordOrdinal();
         if (after <= before) return;
+        self.requestPositionSaveAfterReadingMovement();
         self.recordManualPace(anchor, now_ms, after - before);
     }
 
@@ -2577,7 +2591,7 @@ pub const ReaderCoordinator = struct {
             .window = self.paged.scrollRenderState(self.paged.scrollPosition(), self.scrollGeometry()),
             // Hide the previous chapter's provisional beginning until its final Scroll
             // viewport is restored.
-            .restoring = self.scroll_restore_pending != null or self.scroll_align_chapter_end,
+            .restoring = self.scroll_restore_pending != null or self.scroll_align_chapter_end or !self.paged.scrollViewportReady(self.scrollGeometry()),
             .mode_switch_loading = self.mode_switch_loading,
             .chapter_end_overscroll_px = self.scroll_chapter_end_overscroll_px,
             .chapter_start_overscroll_px = self.scroll_chapter_start_overscroll_px,
@@ -3250,6 +3264,8 @@ test "Scroll restoration hides the provisional chapter start until its word reso
     }
 
     coordinator.paged.pending_selection = null;
+    coordinator.paged.chapter_end = true;
+    coordinator.paged.chapter_last_page = 0;
     coordinator.resolveScrollRestoreBarrier();
     switch (coordinator.renderModel()) {
         .scroll => |view| try std.testing.expect(!view.restoring),
@@ -3272,6 +3288,11 @@ test "Scroll predecessor restoration hides text until its chapter end is aligned
     }
 
     coordinator.scroll_align_chapter_end = false;
+    coordinator.paged.current_ready = true;
+    try coordinator.paged.pages[0].appendLine("last line");
+    coordinator.paged.slots[0] = .{ .role = .displayed, .chapter = 0, .page = 0 };
+    coordinator.paged.chapter_end = true;
+    coordinator.paged.chapter_last_page = 0;
     switch (coordinator.renderModel()) {
         .scroll => |view| try std.testing.expect(!view.restoring),
         else => return error.TestUnexpectedResult,

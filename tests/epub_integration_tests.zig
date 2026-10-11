@@ -260,3 +260,74 @@ fn testFontHeight(_: *anyopaque, _: @import("../src/storage/settings.zig").Readi
 fn monospaceWidthForFont(context: *anyopaque, _: @import("../src/storage/settings.zig").ReadingFont, text: []const u8) usize {
     return monospaceWidth(context, text);
 }
+
+test "diagnostic EPUB Scroll keeps a full cached viewport through Unicode and delayed page boundaries" {
+    const reader = @import("../src/reader/reader_coordinator.zig");
+    const host = @import("../src/reader/reader_host.zig");
+    const geometry = @import("../src/reader/scroll_geometry.zig").Geometry.init(20);
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var file = try std.Io.Dir.cwd().openFile(io, "tests/fixtures/scroll-diagnostics.epub", .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+    var source = FixtureReader{ .io = io, .file = file, .size = @intCast(stat.size) };
+    var scan: [1024]u8 = undefined;
+    const archive = try zip.Archive.open(source.reader(), &scan);
+    const opf = try readEntry(std.testing.allocator, archive, "book.opf");
+    defer std.testing.allocator.free(opf);
+    const coordinator = try std.testing.allocator.create(reader.ReaderCoordinator);
+    defer std.testing.allocator.destroy(coordinator);
+    coordinator.initInPlace(128);
+    var workspace: epub.OpfWorkspace = undefined;
+    try epub.parseOpf(opf, "book.opf", &coordinator.book_session.publication, &workspace);
+    const Files = struct {
+        fn open(context: *anyopaque, _: host.FileSlot, _: [:0]const u8) host.FileError!zip.Reader {
+            const fixture: *FixtureReader = @ptrCast(@alignCast(context));
+            return fixture.reader();
+        }
+        fn close(_: *anyopaque, _: host.FileSlot) void {}
+        fn width(_: *anyopaque, _: reader.ReadingFont, text: []const u8) usize {
+            return (std.unicode.utf8CountCodepoints(text) catch unreachable) * 8;
+        }
+        fn list(_: *anyopaque, _: *host.Library) void {}
+    };
+    coordinator.attachHost(.{
+        .files = .{ .context = &source, .open = Files.open, .close = Files.close, .list_epubs = Files.list },
+        .measure = .{ .context = &source, .width = Files.width, .font_height = testFontHeight },
+    });
+    defer coordinator.leaveBook(999999);
+    coordinator.lifecycle = .ready;
+    coordinator.screen = .reading;
+    coordinator.paged_presentation = .scroll;
+    for (0..4) |chapter| {
+        coordinator.openChapter(@intCast(chapter), .normal);
+        var waiting_frames: usize = 0;
+        var reached_end = false;
+        for (0..20000) |frame| {
+            coordinator.update(.{ .crank_change = 30, .crank_docked = false }, @intCast(frame * 33));
+            try std.testing.expectEqual(reader.Lifecycle.ready, coordinator.lifecycle);
+            if (coordinator.chapter_pump.chapter_open != null) continue;
+            try std.testing.expectEqual(@as(u8, @intCast(chapter)), coordinator.chapter_index);
+            const model = coordinator.renderModel();
+            if (model.scroll.restoring) continue;
+            if (coordinator.paged.scrollPosition().waiting_px > 0) waiting_frames += 1;
+            var bottom: i32 = geometry.viewport.top_y;
+            for (model.scroll.window.tiles[0..model.scroll.window.tile_count]) |tile| switch (tile) {
+                .page => |page| {
+                    try std.testing.expect(page.origin_y <= bottom);
+                    bottom = @max(bottom, @as(i32, page.origin_y) + geometry.pageExtent(page.cache.line_count));
+                    for (0..page.cache.line_count) |index| try std.testing.expect(std.unicode.utf8ValidateSlice(page.cache.line(index)));
+                },
+                .loading_after => |origin| try std.testing.expect(origin >= geometry.viewport.bottom_y),
+                else => return error.TestUnexpectedResult,
+            };
+            if (!coordinator.paged.chapter_end) try std.testing.expect(bottom >= geometry.viewport.bottom_y);
+            if (coordinator.paged.chapter_end and coordinator.paged.scrollEndingVisible(geometry, coordinator.paged.wordCount())) {
+                reached_end = true;
+                break;
+            }
+        }
+        try std.testing.expect(reached_end);
+        if (chapter >= 2) try std.testing.expect(waiting_frames != 0);
+    }
+}
