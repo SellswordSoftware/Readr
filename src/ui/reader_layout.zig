@@ -55,18 +55,31 @@ pub fn highlightRect(word_x: usize, line_y: usize, word_width: usize, font_heigh
 }
 
 pub fn rsvpGeometry(font_height_value: usize) RsvpGeometry {
+    return rsvpGeometryInRect(font_height_value, 0, screen_height);
+}
+
+pub fn rsvpGeometryInRect(font_height_value: usize, top: usize, height: usize) RsvpGeometry {
     const font_height = @max(font_height_value, 1);
-    const word_y = (screen_height -| font_height) / 2;
-    const clearance = @max(@as(usize, 2), font_height / 4);
-    const tick_length = @max(@as(usize, 4), font_height / 2);
-    const guide_top_y = word_y -| clearance;
-    const guide_bottom_y = @min(screen_height - 1, word_y +| font_height +| clearance);
+    const bottom = top + @max(height, 1) - 1;
+    const word_y = top + (height -| font_height) / 2;
+    const nominal_clearance = @max(@as(usize, 2), font_height / 4);
+    const nominal_tick = @max(@as(usize, 4), font_height / 2);
+    const headroom = (height -| font_height) / 2;
+    // Small preview panels keep native word size. Fit both the clearance and
+    // ticks into the surrounding space rather than losing the ticks to clipping.
+    const clearance = if (headroom >= nominal_clearance + nominal_tick)
+        nominal_clearance
+    else
+        @min(headroom, @max(@as(usize, 2), headroom * nominal_clearance / (nominal_clearance + nominal_tick)));
+    const tick_length = @min(nominal_tick, headroom -| clearance);
+    const guide_top_y = @max(top, word_y -| clearance);
+    const guide_bottom_y = @min(bottom, word_y +| font_height +| clearance);
     return .{
         .word_y = word_y,
         .guide_top_y = guide_top_y,
         .guide_bottom_y = guide_bottom_y,
-        .top_tick_start_y = guide_top_y -| tick_length,
-        .bottom_tick_end_y = @min(screen_height - 1, guide_bottom_y +| tick_length),
+        .top_tick_start_y = @max(top, guide_top_y -| tick_length),
+        .bottom_tick_end_y = @min(bottom, guide_bottom_y +| tick_length),
     };
 }
 
@@ -82,4 +95,14 @@ test "RSVP guides derive clearance and ticks from the font cell" {
     try std.testing.expectEqual(@as(usize, 135), geometry.guide_bottom_y);
     try std.testing.expectEqual(@as(usize, 95), geometry.top_tick_start_y);
     try std.testing.expectEqual(@as(usize, 145), geometry.bottom_tick_end_y);
+}
+
+test "RSVP preview keeps guides and ticks visible around the largest bundled font cell" {
+    const geometry = rsvpGeometryInRect(59, 122, 84);
+    try std.testing.expect(geometry.top_tick_start_y >= 122);
+    try std.testing.expect(geometry.top_tick_start_y < geometry.guide_top_y);
+    try std.testing.expect(geometry.guide_top_y < geometry.word_y);
+    try std.testing.expect(geometry.word_y + 59 < geometry.guide_bottom_y);
+    try std.testing.expect(geometry.guide_bottom_y < geometry.bottom_tick_end_y);
+    try std.testing.expect(geometry.bottom_tick_end_y < 206);
 }

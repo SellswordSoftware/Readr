@@ -16,6 +16,10 @@ const screen_transition = @import("../ui/animation/screen_transition.zig");
 const library_transition = @import("../ui/animation/library_transition.zig");
 const word_spotlight = @import("../ui/animation/word_spotlight.zig");
 const highlight_collapse = @import("../ui/animation/highlight_collapse.zig");
+const settings_menu = @import("../ui/settings_menu.zig");
+const font_preview = @import("../ui/font_preview.zig");
+const preview_animation = @import("../ui/animation/font_preview.zig");
+const rsvp = @import("../content/rsvp.zig");
 
 pub const Renderer = struct {
     playdate: *pdapi.PlaydateAPI,
@@ -49,6 +53,9 @@ pub const Renderer = struct {
     word_spotlight_state: word_spotlight.State = .{},
     last_word_spotlight_nonce: u32 = 0,
     highlight_collapse_state: highlight_collapse.State = .{},
+    font_preview_state: preview_animation.State = .{},
+    font_preview_font: reader_view.ReadingFont = .newsleak_serif,
+    font_preview_rsvp: bool = false,
     last_highlight_dismiss_nonce: u32 = 0,
     frame_now_ms: u32 = 0,
     reduce_flashing: bool = false,
@@ -91,6 +98,7 @@ pub const Renderer = struct {
         return self.screen_transition_state.active or
             (has_library and (self.library_transition_state.active or self.library_marquee.distance > 0)) or
             (has_page and (self.word_spotlight_state.active or self.highlight_collapse_state.active)) or
+            (model.* == .settings and self.font_preview_state.active) or
             invalidation.loadingAnimated(model);
     }
 
@@ -170,6 +178,7 @@ pub const Renderer = struct {
     pub fn draw(self: *Renderer, model: *const reader_view.RenderModel, allocator_stats: AllocatorStats, now_ms: u32, reduce_flashing: bool) void {
         self.frame_now_ms = now_ms;
         self.reduce_flashing = reduce_flashing;
+        if (model.* != .settings) self.font_preview_state = .{};
         if (reduce_flashing) {
             self.word_spotlight_state.cancel();
             self.highlight_collapse_state.cancel();
@@ -596,7 +605,20 @@ pub const Renderer = struct {
         return patternColor(if (self.theme == .dark) &loading_rail_pattern_dark else &loading_rail_pattern_light);
     }
 
-    fn drawSettings(self: *Renderer, view: *const reader_view.SettingsView) void {
+    fn drawSettings(self: *Renderer, source: *const reader_view.SettingsView) void {
+        var displayed = source.*;
+        const view = &displayed;
+        const has_preview = settings_menu.hasFontPreview(view.selected);
+        const expansion = self.font_preview_state.update(has_preview, self.frame_now_ms, self.reduce_flashing);
+        if (has_preview) {
+            self.font_preview_font = if (view.selected == .pages_font) view.pages_font else view.rsvp_font;
+            self.font_preview_rsvp = view.selected == .rsvp_font;
+        } else if (expansion > 0) {
+            // Keep the newly selected setting visible above the shrinking card.
+            // Restore the seven-row list once the card has disappeared.
+            view.row_count = @min(settings_menu.preview_capacity, view.total_rows);
+            view.first_visible = @min(@intFromEnum(view.selected) -| (view.row_count - 1), view.total_rows - view.row_count);
+        }
         const screen_width: c_int = @intCast(reader_layout.screen_width);
         const screen_height: c_int = @intCast(reader_layout.screen_height);
         const header_height: c_int = 36;
@@ -652,6 +674,7 @@ pub const Renderer = struct {
             };
             self.drawSettingsItem(label, value, row == view.selected, row == .reset_progress, view.reset_hold_ms, y, row_height);
         }
+        if (expansion > 0) self.drawSettingsFontPreview(self.font_preview_font, self.font_preview_rsvp, expansion);
         self.drawSettingsScrollbar(view);
         self.text(if (view.selected == .reset_progress) "Hold A: reset     B: back" else "A: change     B: back", 12, 217);
     }
@@ -688,7 +711,49 @@ pub const Renderer = struct {
     }
 
     fn drawSettingsScrollbar(self: *Renderer, view: *const reader_view.SettingsView) void {
-        self.drawRoundedScrollbar(394, 43, 4, 163, @intCast(view.first_visible), @intCast(view.row_count), @intCast(view.total_rows));
+        const height: c_int = if (view.row_count <= settings_menu.preview_capacity) 70 else 163;
+        self.drawRoundedScrollbar(394, 43, 4, height, @intCast(view.first_visible), @intCast(view.row_count), @intCast(view.total_rows));
+    }
+
+    const PreviewMeasure = struct {
+        renderer: *Renderer,
+        font: reader_view.ReadingFont,
+
+        fn width(context: *anyopaque, value: []const u8) usize {
+            const measure: *PreviewMeasure = @ptrCast(@alignCast(context));
+            return @intCast(@max(0, measure.renderer.readingTextWidth(measure.font, value)));
+        }
+    };
+
+    fn drawSettingsFontPreview(self: *Renderer, font: reader_view.ReadingFont, is_rsvp: bool, expansion: u16) void {
+        const height = (font_preview.bottom - font_preview.top) * @as(usize, expansion) / preview_animation.full;
+        if (height == 0) return;
+        const radius: c_int = @intCast(@min(4, height / 2));
+        self.playdate.graphics.setDrawMode(.DrawModeCopy);
+        // Border and padding sit outside the reader's 384-pixel wrapping width.
+        self.playdate.graphics.fillRoundRect(4, @intCast(font_preview.top), 392, @intCast(height), radius, solidColor(self.backgroundColor()));
+        if (self.font_preview_state.visible) self.rule(24, font_preview.anchor_y, 24, font_preview.top);
+        if (height > 2) {
+            self.playdate.graphics.setClipRect(5, @intCast(font_preview.top + 1), 390, @intCast(height - 2));
+            self.playdate.graphics.setDrawMode(self.textDrawMode());
+            const font_height = self.readingFontHeight(font);
+            if (is_rsvp) {
+                const anchor = rsvp.anchorBytes(font_preview.rsvp_sample).?;
+                self.drawRsvpWord(font, font_preview.rsvp_sample, .{ .start = anchor.start, .end = anchor.end }, reader_layout.rsvpGeometryInRect(font_height, font_preview.top + 2, font_preview.bottom - font_preview.top - 4));
+            } else {
+                var measure = PreviewMeasure{ .renderer = self, .font = font };
+                const lines = font_preview.layout(font_height, .{ .context = &measure, .width = PreviewMeasure.width });
+                const advance = reader_layout.lineAdvance(font_height);
+                for (lines.text[0..lines.count], 0..) |line, index| {
+                    self.readingText(font, line, @intCast(reader_layout.text_x), @intCast(font_preview.text_top + index * advance));
+                }
+            }
+        }
+        self.playdate.graphics.setClipRect(0, 0, @intCast(reader_layout.screen_width), @intCast(reader_layout.screen_height));
+        self.playdate.graphics.setDrawMode(.DrawModeCopy);
+        self.playdate.graphics.drawRoundRect(4, @intCast(font_preview.top), 392, @intCast(height), radius, 1, solidColor(self.foregroundColor()));
+        self.selectUiFont(false);
+        self.playdate.graphics.setDrawMode(self.textDrawMode());
     }
 
     fn drawRoundedScrollbar(self: *Renderer, track_x: c_int, track_y: c_int, track_width: c_int, track_height: c_int, first_visible: usize, visible_rows: usize, total_rows: usize) void {
@@ -957,18 +1022,22 @@ pub const Renderer = struct {
         self.text(std.fmt.bufPrint(&buffer, "WPM: {d}", .{view.wpm}) catch "", 12, 36);
         const font = self.rsvp_font;
         const geometry = reader_layout.rsvpGeometry(self.readingFontHeight(font));
+        self.drawRsvpWord(font, word, view.anchor, geometry);
+        self.text("A: play  Up/Down: WPM", 12, 192);
+        self.text("Left: prev sentence  B: back", 12, 216);
+    }
+
+    fn drawRsvpWord(self: *Renderer, font: reader_view.ReadingFont, word: []const u8, anchor_span: ?reader_view.ByteSpan, geometry: reader_layout.RsvpGeometry) void {
         self.rule(0, geometry.guide_top_y, reader_layout.screen_width - 1, geometry.guide_top_y);
         self.rule(0, geometry.guide_bottom_y, reader_layout.screen_width - 1, geometry.guide_bottom_y);
         self.rule(reader_layout.rsvp_anchor_x, geometry.top_tick_start_y, reader_layout.rsvp_anchor_x, geometry.guide_top_y);
         self.rule(reader_layout.rsvp_anchor_x, geometry.guide_bottom_y, reader_layout.rsvp_anchor_x, geometry.bottom_tick_end_y);
-        if (view.anchor) |anchor| {
+        if (anchor_span) |anchor| {
             const prefix_width = self.readingTextWidth(font, word[0..anchor.start]);
             const anchor_width = self.readingTextWidth(font, word[0..anchor.end]) - prefix_width;
             const x = @as(c_int, @intCast(reader_layout.rsvp_anchor_x)) - prefix_width - @divTrunc(anchor_width, 2);
             self.readingText(font, word, x, @intCast(geometry.word_y));
         } else self.readingText(font, word, @intCast(reader_layout.text_x), @intCast(geometry.word_y));
-        self.text("A: play  Up/Down: WPM", 12, 192);
-        self.text("Left: prev sentence  B: back", 12, 216);
     }
 
     fn drawScroll(self: *Renderer, view: *const reader_view.ScrollView) void {
@@ -1330,6 +1399,87 @@ fn fontName(font: reader_view.ReadingFont) []const u8 {
         .espy_sans_5 => "Espy Sans 5",
         .literata_36pt_medium_30 => "Literata 30 Medium",
     };
+}
+
+test "font previews use native metrics stay inside their panel and restore drawing state" {
+    const Fake = struct {
+        var selected: ?*pdapi.LCDFont = null;
+        var texts: usize = 0;
+        var borders: usize = 0;
+        var clip_top: c_int = 0;
+        var clip_height: c_int = 240;
+        fn font(face: ?*pdapi.LCDFont) callconv(.c) void {
+            selected = face;
+        }
+        fn height(face: ?*pdapi.LCDFont) callconv(.c) u8 {
+            return @intCast(@intFromPtr(face.?));
+        }
+        fn width(face: ?*pdapi.LCDFont, _: ?*const anyopaque, len: usize, _: pdapi.PDStringEncoding, _: c_int) callconv(.c) c_int {
+            return @intCast(len * (height(face) / 2));
+        }
+        fn glyph(_: ?*pdapi.LCDFont, _: u32, _: ?*?*pdapi.LCDBitmap, _: ?*c_int) callconv(.c) ?*pdapi.LCDFontGlyph {
+            return @ptrFromInt(4);
+        }
+        fn draw(_: ?*const anyopaque, len: usize, _: pdapi.PDStringEncoding, x: c_int, y: c_int) callconv(.c) c_int {
+            std.debug.assert(y >= font_preview.top and y + height(selected) <= font_preview.bottom);
+            std.debug.assert(x >= reader_layout.text_x and x + @as(c_int, @intCast(len * (height(selected) / 2))) <= reader_layout.screen_width - reader_layout.text_x);
+            texts += 1;
+            return 1;
+        }
+        fn clip(_: c_int, top: c_int, _: c_int, height_value: c_int) callconv(.c) void {
+            clip_top = top;
+            clip_height = height_value;
+        }
+        fn mode(_: pdapi.LCDBitmapDrawMode) callconv(.c) void {}
+        fn rect(_: c_int, _: c_int, _: c_int, _: c_int, _: pdapi.LCDColor) callconv(.c) void {}
+        fn roundRect(_: c_int, _: c_int, _: c_int, _: c_int, _: c_int, _: pdapi.LCDColor) callconv(.c) void {}
+        fn border(x: c_int, y: c_int, width_value: c_int, height_value: c_int, _: c_int, _: c_int, _: pdapi.LCDColor) callconv(.c) void {
+            std.debug.assert(x == 4 and width_value == 392 and y == font_preview.top);
+            std.debug.assert(height_value > 0 and y + height_value <= font_preview.bottom);
+            borders += 1;
+        }
+        fn line(_: c_int, y1: c_int, _: c_int, y2: c_int, _: c_int, _: pdapi.LCDColor) callconv(.c) void {
+            std.debug.assert(y1 >= font_preview.anchor_y and y2 < font_preview.bottom);
+        }
+    };
+    var graphics: pdapi.PlaydateGraphics = undefined;
+    graphics.setFont = Fake.font;
+    graphics.getFontHeight = Fake.height;
+    graphics.getTextWidth = Fake.width;
+    graphics.getFontGlyph = Fake.glyph;
+    graphics.drawText = Fake.draw;
+    graphics.setClipRect = Fake.clip;
+    graphics.setDrawMode = Fake.mode;
+    graphics.fillRect = Fake.rect;
+    graphics.fillRoundRect = Fake.roundRect;
+    graphics.drawRoundRect = Fake.border;
+    graphics.drawLine = Fake.line;
+    var api: pdapi.PlaydateAPI = undefined;
+    api.graphics = &graphics;
+    var renderer: Renderer = undefined;
+    renderer.initInPlace(&api, @ptrFromInt(20), @ptrFromInt(20), @ptrFromInt(18), @ptrFromInt(20), @ptrFromInt(17), @ptrFromInt(20), @ptrFromInt(20), @ptrFromInt(59), @ptrFromInt(11), @ptrFromInt(20), @ptrFromInt(24));
+    for ([_]reader_view.Theme{ .light, .dark }) |theme| {
+        renderer.theme = theme;
+        inline for (std.meta.tags(reader_view.ReadingFont)) |font| {
+            Fake.texts = 0;
+            Fake.borders = 0;
+            const is_rsvp = font == .roobert_20_medium or font == .roobert_24_medium or font == .literata_36pt_medium_30;
+            renderer.drawSettingsFontPreview(font, is_rsvp, preview_animation.full);
+            try std.testing.expect(Fake.texts > 0);
+            try std.testing.expectEqual(@as(usize, 1), Fake.borders);
+            if (is_rsvp) try std.testing.expectEqual(@as(usize, 1), Fake.texts);
+            try std.testing.expectEqual(@as(c_int, 0), Fake.clip_top);
+            try std.testing.expectEqual(@as(c_int, 240), Fake.clip_height);
+            try std.testing.expectEqual(renderer.ui_regular_font, Fake.selected.?);
+        }
+    }
+    Fake.texts = 0;
+    Fake.borders = 0;
+    renderer.drawSettingsFontPreview(.newsleak_serif, false, 0);
+    try std.testing.expectEqual(@as(usize, 0), Fake.borders);
+    renderer.drawSettingsFontPreview(.newsleak_serif, false, 20);
+    try std.testing.expectEqual(@as(usize, 1), Fake.borders);
+    try std.testing.expectEqual(@as(usize, 0), Fake.texts);
 }
 
 test "Scroll loading indicators never draw over cached text" {

@@ -14,6 +14,11 @@ pub const Row = enum(u4) {
 pub const row_count: u4 = 10;
 pub const global_row_count: u4 = @intFromEnum(Row.reset_progress);
 pub const visible_capacity: u4 = 7;
+pub const preview_capacity: u4 = 3;
+
+pub fn hasFontPreview(row: Row) bool {
+    return row == .pages_font or row == .rsvp_font;
+}
 
 test "Theme is the first settings row" {
     try @import("std").testing.expectEqual(@as(u4, 0), @intFromEnum(Row.theme));
@@ -37,7 +42,7 @@ pub const Model = struct {
     pub fn setAvailableRows(self: *Model, count: u4) void {
         self.available_rows = @max(@as(u4, 1), @min(row_count, count));
         if (@intFromEnum(self.selected) >= self.available_rows) self.selected = @enumFromInt(self.available_rows - 1);
-        const displayed = @min(visible_capacity, self.available_rows);
+        const displayed = @min(self.visibleCapacity(), self.available_rows);
         self.first_visible = @min(self.first_visible, self.available_rows - displayed);
         self.ensureVisible();
     }
@@ -56,15 +61,26 @@ pub const Model = struct {
     }
 
     pub fn displayedCount(self: *const Model) u4 {
-        return @min(visible_capacity, self.available_rows - self.first_visible);
+        return @min(self.visibleCapacity(), self.available_rows - self.first_visible);
+    }
+
+    fn visibleCapacity(self: *const Model) u4 {
+        return if (hasFontPreview(self.selected)) preview_capacity else visible_capacity;
     }
 
     fn ensureVisible(self: *Model) void {
         const selected: u4 = @intFromEnum(self.selected);
+        if (hasFontPreview(self.selected)) {
+            // The preview opens from the bottom of the selected control.
+            self.first_visible = selected - (preview_capacity - 1);
+            return;
+        }
+        const capacity = self.visibleCapacity();
+        self.first_visible = @min(self.first_visible, self.available_rows - @min(capacity, self.available_rows));
         if (selected < self.first_visible) {
             self.first_visible = selected;
-        } else if (selected >= self.first_visible + visible_capacity) {
-            self.first_visible = selected - visible_capacity + 1;
+        } else if (selected >= self.first_visible + capacity) {
+            self.first_visible = selected - capacity + 1;
         }
     }
 };
@@ -75,4 +91,20 @@ test "global settings omit only book-specific progress reset" {
     model.move(-1);
     try @import("std").testing.expectEqual(Row.progress_scope, model.selected);
     try @import("std").testing.expectEqual(visible_capacity, model.displayedCount());
+}
+
+test "font focus makes room for a preview and anchors the selected control above it" {
+    const std = @import("std");
+    var model = Model{};
+    for (0..4) |_| model.move(1);
+    try std.testing.expectEqual(Row.pages_font, model.selected);
+    try std.testing.expectEqual(@as(u4, 3), model.displayedCount());
+    try std.testing.expectEqual(@as(u4, 2), model.first_visible);
+    model.move(1);
+    try std.testing.expectEqual(Row.rsvp_font, model.selected);
+    try std.testing.expectEqual(@as(u4, 3), model.displayedCount());
+    try std.testing.expectEqual(@as(u4, 3), model.first_visible);
+    model.move(1);
+    try std.testing.expectEqual(@as(u4, 7), model.displayedCount());
+    try std.testing.expect(@intFromEnum(model.selected) < model.first_visible + model.displayedCount());
 }

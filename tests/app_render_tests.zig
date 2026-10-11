@@ -143,6 +143,52 @@ test "120 idle SDK updates draw once instead of 120 times in Pages and paused RS
     }
 }
 
+test "Settings preview animates to its last frame then idles and respects Reduce Flashing" {
+    const Motion = struct {
+        fn enabled() callconv(.c) c_int {
+            return 0;
+        }
+    };
+    const app = try std.testing.allocator.create(App);
+    defer std.testing.allocator.destroy(app);
+    var api: pdapi.PlaydateAPI = undefined;
+    var system: pdapi.PlaydateSys = undefined;
+    var graphics: pdapi.PlaydateGraphics = undefined;
+    var allocator: Allocator = undefined;
+    try Fake.setup(app, &api, &system, &graphics, &allocator, .paged);
+    system.getReduceFlashing = Motion.enabled;
+    try std.testing.expect(app.coordinator.openSettings());
+    for (0..4) |_| app.coordinator.moveSettingsSelection(1);
+    for (0..7) |frame| {
+        Fake.now = @intCast(frame * 30);
+        try std.testing.expectEqual(@as(c_int, 1), app.updateAndRender());
+    }
+    Fake.now = 210;
+    try std.testing.expectEqual(@as(c_int, 0), app.updateAndRender());
+    app.coordinator.moveSettingsSelection(1); // RSVP: keep the panel open.
+    try std.testing.expectEqual(@as(c_int, 1), app.updateAndRender());
+    try std.testing.expectEqual(@as(c_int, 0), app.updateAndRender());
+    Fake.pressed = pdapi.BUTTON_A;
+    try std.testing.expectEqual(@as(c_int, 1), app.updateAndRender());
+    Fake.pressed = 0;
+    try std.testing.expectEqual(@as(c_int, 0), app.updateAndRender());
+    app.coordinator.moveSettingsSelection(1); // Hide the preview.
+    try std.testing.expectEqual(@as(c_int, 1), app.updateAndRender());
+    for (1..7) |frame| {
+        Fake.now = @intCast(210 + frame * 30);
+        try std.testing.expectEqual(@as(c_int, 1), app.updateAndRender());
+    }
+    Fake.now = 420;
+    try std.testing.expectEqual(@as(c_int, 0), app.updateAndRender());
+    app.coordinator.moveSettingsSelection(-1);
+    try std.testing.expectEqual(@as(c_int, 1), app.updateAndRender());
+    Fake.now += 30;
+    try std.testing.expectEqual(@as(c_int, 1), app.updateAndRender());
+    system.getReduceFlashing = Fake.yes;
+    try std.testing.expectEqual(@as(c_int, 1), app.updateAndRender());
+    try std.testing.expectEqual(@as(c_int, 0), app.updateAndRender());
+}
+
 test "SDK idle updates still handle inputs and resume requests a new frame" {
     const app = try std.testing.allocator.create(App);
     defer std.testing.allocator.destroy(app);

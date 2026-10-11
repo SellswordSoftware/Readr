@@ -55,7 +55,7 @@ pub const reader_cache_reserved_bytes = page_pool_reserved_bytes + word_pool_res
 
 fn paginationMeasure(self: *const ReaderCoordinator) pagination.Measure {
     const measure = self.host.?.measure;
-    const font_height = measure.font_height(measure.context, self.pages_font);
+    const font_height = measure.font_height(measure.context, self.appliedPagesFont());
     return .{
         .context = @constCast(self),
         .width = paginationWidth,
@@ -65,7 +65,7 @@ fn paginationMeasure(self: *const ReaderCoordinator) pagination.Measure {
 
 fn paginationWidth(context: *anyopaque, text: []const u8) usize {
     const self: *const ReaderCoordinator = @ptrCast(@alignCast(context));
-    return self.host.?.measure.width(self.host.?.measure.context, self.pages_font, text);
+    return self.host.?.measure.width(self.host.?.measure.context, self.appliedPagesFont(), text);
 }
 
 pub const Screen = reader_view.Screen;
@@ -146,6 +146,10 @@ pub const ReaderCoordinator = struct {
     sound_reset_completed: bool = false,
     theme: Theme = .light,
     pages_font: ReadingFont = .newsleak_serif,
+    /// The selected preference can change while Settings previews it; active
+    /// builders and Scroll geometry must keep using their original font.
+    paged_layout_font: ?ReadingFont = null,
+    settings_font_target: ?u32 = null,
     rsvp_font: ReadingFont = .roobert_20_medium,
     progress_visibility: ProgressVisibility = .on,
     progress_position: ProgressPosition = .bottom,
@@ -252,7 +256,11 @@ pub const ReaderCoordinator = struct {
 
     pub fn measureText(self: *const ReaderCoordinator, text: []const u8) usize {
         const measure = self.host.?.measure;
-        return measure.width(measure.context, self.pages_font, text);
+        return measure.width(measure.context, self.appliedPagesFont(), text);
+    }
+
+    fn appliedPagesFont(self: *const ReaderCoordinator) ReadingFont {
+        return self.paged_layout_font orelse self.pages_font;
     }
 
     pub fn discoverLibrary(self: *ReaderCoordinator) void {
@@ -463,7 +471,7 @@ pub const ReaderCoordinator = struct {
 
     fn scrollGeometry(self: *const ReaderCoordinator) scroll_geometry.Geometry {
         const measure = if (self.host) |host| host.measure else return scroll_geometry.Geometry.init(20);
-        const font_height = measure.font_height(measure.context, self.pages_font);
+        const font_height = measure.font_height(measure.context, self.appliedPagesFont());
         return scroll_geometry.Geometry.init(font_height);
     }
 
@@ -485,8 +493,11 @@ pub const ReaderCoordinator = struct {
 
     fn changeScreen(self: *ReaderCoordinator, screen: Screen) void {
         if (self.screen == screen) return;
+        const leaving_settings = self.screen == .settings;
         self.clearTransientCrank();
         self.screen = screen;
+        if (screen == .reading) self.reconcilePagesFont();
+        if (leaving_settings) self.settings_font_target = null;
         if (screen == .library) self.library_refresh_pending = true;
     }
 
@@ -1194,6 +1205,10 @@ pub const ReaderCoordinator = struct {
 
     /// Release the previous stream and lease before replacing a chapter request.
     pub fn openChapter(self: *ReaderCoordinator, index: u8, action: ChapterOpenAction) void {
+        if (action != .scroll_rescan) {
+            self.paged_layout_font = self.pages_font;
+            self.settings_font_target = null;
+        }
         self.rsvp_tail_return = null;
         self.manual_pace.discard();
         self.pending_prefetch_transition = null;
@@ -2165,16 +2180,28 @@ pub const ReaderCoordinator = struct {
 
     fn switchPagesFont(self: *ReaderCoordinator) void {
         self.sound_navigation = null;
+        const previous_font = self.appliedPagesFont();
+        if (self.lifecycle == .ready and self.mode == .paged and self.settings_font_target == null) {
+            self.settings_font_target = self.pending_mode_word_ordinal orelse reader_transitions.pagedModeSwitchOrdinal(self.currentPagedWordOrdinal(), self.paged.pending_selection);
+        }
+        self.paged_layout_font = previous_font;
         self.pages_font = persistence.nextPagesFont(self.pages_font);
         self.saveSettings();
-        if (self.lifecycle != .ready or self.mode != .paged) return;
+        if (self.screen != .settings) self.reconcilePagesFont();
+    }
 
-        const target_word = reader_transitions.pagedModeSwitchOrdinal(self.currentPagedWordOrdinal(), self.paged.pending_selection);
+    fn reconcilePagesFont(self: *ReaderCoordinator) void {
+        if (self.lifecycle != .ready or self.mode != .paged or self.appliedPagesFont() == self.pages_font) return;
+
+        const target_word = self.settings_font_target orelse self.pending_mode_word_ordinal orelse reader_transitions.pagedModeSwitchOrdinal(self.currentPagedWordOrdinal(), self.paged.pending_selection);
+        const chapter = if (self.chapter_pump.chapter_open) |job| job.index else self.chapter_index;
         self.pending_mode_word_ordinal = target_word;
         self.paged.pending_selection = .{ .ordinal = target_word };
+        self.restore_transition_pending = self.paged_presentation == .pages;
+        self.scroll_restore_pending = if (self.paged_presentation == .scroll) .{ .word = target_word } else null;
         self.paged.clearScrollTransient();
         self.scroll_crank_millidegrees = 0;
-        self.openChapter(self.chapter_index, .{ .word_rescan = target_word });
+        self.openChapter(chapter, .{ .word_rescan = target_word });
         self.requestPositionSave();
     }
 
@@ -3556,6 +3583,32 @@ test "font settings rebuild only active Pages or Scroll layout" {
     try std.testing.expect(coordinator.chapter_pump.chapter_open == null);
 }
 
+test "font previews retain the reading word and defer layout work until Settings closes" {
+    var coordinator: ReaderCoordinator = undefined;
+    coordinator.initInPlace(128);
+    coordinator.screen = .reading;
+    coordinator.lifecycle = .ready;
+    coordinator.chapter_index = 2;
+    coordinator.paged.current_ready = true;
+    coordinator.paged.pages[0].first_word_ordinal = 17;
+    try coordinator.paged.pages[0].appendLineWithMetadata("word", 0, 1);
+    coordinator.paged.pages[0].word_count = 1;
+    coordinator.paged.selected_word_ordinal = 17;
+    try std.testing.expect(coordinator.openSettings());
+    coordinator.switchPagesFont();
+    coordinator.switchPagesFont();
+    try std.testing.expectEqual(ReadingFont.asheville_sans_14_bold, coordinator.pages_font);
+    try std.testing.expect(coordinator.paged.current_ready);
+    try std.testing.expect(coordinator.chapter_pump.chapter_open == null);
+    try std.testing.expectEqual(@as(u32, 17), coordinator.currentPagedWordOrdinal());
+    try std.testing.expect(coordinator.closeSettings());
+    try std.testing.expect(!coordinator.paged.current_ready);
+    switch (coordinator.chapter_pump.chapter_open.?.action) {
+        .word_rescan => |word| try std.testing.expectEqual(@as(u32, 17), word),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "coordinator raises only semantic reconstruction work to the reconstruction ceiling" {
     var coordinator: ReaderCoordinator = undefined;
     coordinator.initInPlace(128);
@@ -3570,6 +3623,84 @@ test "coordinator raises only semantic reconstruction work to the reconstruction
     coordinator.mode = .rsvp;
     coordinator.rsvp_reader.reconstruct(.{ .word = 12 });
     try std.testing.expectEqual(limits.reconstruction_bytes_per_update, coordinator.chapterWorkBudget());
+}
+
+test "cycling back to the applied font skips a rebuild and a later preview uses the new word" {
+    for ([_]PagedPresentation{ .pages, .scroll }) |presentation| {
+        var coordinator: ReaderCoordinator = undefined;
+        coordinator.initInPlace(128);
+        coordinator.screen = .reading;
+        coordinator.lifecycle = .ready;
+        coordinator.paged_presentation = presentation;
+        coordinator.paged.current_ready = true;
+        try coordinator.paged.pages[0].appendLineWithMetadata("word", 0, 1);
+        coordinator.paged.pages[0].word_count = 1;
+        coordinator.paged.pages[0].first_word_ordinal = 17;
+        coordinator.paged.slots[0] = .{ .role = .displayed, .page = 0 };
+        try std.testing.expect(coordinator.openSettings());
+        for (0..7) |_| coordinator.switchPagesFont();
+        try std.testing.expect(coordinator.closeSettings());
+        try std.testing.expect(coordinator.paged.current_ready);
+        try std.testing.expect(coordinator.chapter_pump.chapter_open == null);
+        coordinator.paged.pages[0].first_word_ordinal = 31;
+        try std.testing.expect(coordinator.openSettings());
+        coordinator.switchPagesFont();
+        try std.testing.expect(coordinator.closeSettings());
+        try std.testing.expectEqual(@as(u32, 31), coordinator.chapter_pump.chapter_open.?.action.word_rescan);
+        try std.testing.expectEqual(@as(u32, 31), coordinator.positionSnapshot().word_ordinal);
+    }
+}
+
+test "preview fonts cannot alter an active builder or Scroll geometry and preserve pending destinations" {
+    const Measure = struct {
+        fn width(_: *anyopaque, font: ReadingFont, text: []const u8) usize {
+            return text.len * (if (font == .newsleak_serif) @as(usize, 8) else 14);
+        }
+        fn height(_: *anyopaque, font: ReadingFont) usize {
+            return if (font == .newsleak_serif) 20 else 30;
+        }
+    };
+    var coordinator: ReaderCoordinator = undefined;
+    coordinator.initInPlace(128);
+    coordinator.attachHost(.{ .measure = .{ .context = &coordinator, .width = Measure.width, .font_height = Measure.height } });
+    coordinator.lifecycle = .ready;
+    coordinator.screen = .reading;
+    coordinator.paged_presentation = .scroll;
+    coordinator.pending_mode_word_ordinal = 92;
+    coordinator.paged.pending_selection = .{ .ordinal = 92 };
+    coordinator.chapter_pump.chapter_open = .{ .index = 3, .action = .{ .word_rescan = 92 } };
+    try std.testing.expect(coordinator.openSettings());
+    coordinator.switchPagesFont();
+    const measure = paginationMeasure(&coordinator);
+    try std.testing.expectEqual(@as(usize, 24), measure.width(measure.context, "abc"));
+    try std.testing.expectEqual(@as(u16, 21), coordinator.scrollGeometry().line_advance);
+    coordinator.systemPaused(100);
+    coordinator.systemResumed();
+    try std.testing.expectEqual(@as(u32, 92), coordinator.positionSnapshot().word_ordinal);
+    try std.testing.expect(coordinator.closeSettings());
+    try std.testing.expectEqual(@as(u8, 3), coordinator.chapter_pump.chapter_open.?.index);
+    try std.testing.expectEqual(@as(u32, 92), coordinator.chapter_pump.chapter_open.?.action.word_rescan);
+    try std.testing.expectEqual(@as(u16, 31), coordinator.scrollGeometry().line_advance);
+    try std.testing.expectEqual(@as(u32, 92), coordinator.scroll_restore_pending.?.word);
+}
+
+test "a Pages font preview in RSVP applies when returning to Pages at the RSVP word" {
+    var coordinator: ReaderCoordinator = undefined;
+    coordinator.initInPlace(128);
+    coordinator.screen = .reading;
+    coordinator.lifecycle = .ready;
+    coordinator.mode = .rsvp;
+    coordinator.rsvp_reader.begin(0);
+    _ = try coordinator.rsvp_reader.feed("<p>one two three </p>");
+    _ = coordinator.rsvp_reader.nextWord();
+    const word = coordinator.rsvp_reader.position().word;
+    try std.testing.expect(coordinator.openSettings());
+    coordinator.switchPagesFont();
+    try std.testing.expect(coordinator.closeSettings());
+    try std.testing.expect(coordinator.chapter_pump.chapter_open == null);
+    coordinator.switchReadingMode(100);
+    try std.testing.expectEqual(ReadingFont.sasser_slab, coordinator.appliedPagesFont());
+    try std.testing.expectEqual(word, coordinator.chapter_pump.chapter_open.?.action.word_rescan);
 }
 
 test "manual Paged and RSVP forward reading samples once while reverse movement is discarded" {
