@@ -167,6 +167,7 @@ test "bundled EPUB traverses archive, publication, streamed pages, and first cha
     }
     try navigation_parser.finish();
     try std.testing.expectEqualStrings("CHAPTER I. Down the Rabbit-Hole", publication.chapter_labels[2].slice());
+    try std.testing.expectEqual(@as(u8, 2), @import("../src/publication/reading_start.zig").firstChapter(&publication));
 
     var header_page = pagination.PageCache{};
     try renderFirstPage(archive, publication.spine[1].slice(), &header_page);
@@ -330,4 +331,31 @@ test "diagnostic EPUB Scroll keeps a full cached viewport through Unicode and de
         try std.testing.expect(reached_end);
         if (chapter >= 2) try std.testing.expect(waiting_frames != 0);
     }
+}
+
+test "volume heading starts Monte Cristo at its first chapter document" {
+    var threaded = std.Io.Threaded.init_single_threaded;
+    const io = threaded.io();
+    var file = try std.Io.Dir.cwd().openFile(io, "tests/fixtures/big.epub", .{});
+    defer file.close(io);
+    var source = FixtureReader{ .io = io, .file = file, .size = @intCast((try file.stat(io)).size) };
+    var scan_buffer: [1024]u8 = undefined;
+    const archive = try zip.Archive.open(source.reader(), &scan_buffer);
+    const allocator = std.testing.allocator;
+    const container = try readEntry(allocator, archive, "META-INF/container.xml");
+    defer allocator.free(container);
+    var path: [256]u8 = undefined;
+    const opf_path = try epub.parseContainer(container, &path);
+    const opf = try readEntry(allocator, archive, opf_path);
+    defer allocator.free(opf);
+    const publication = try allocator.create(epub.Publication);
+    defer allocator.destroy(publication);
+    var workspace: epub.OpfWorkspace = undefined;
+    try epub.parseOpf(opf, opf_path, publication, &workspace);
+    const nav = try readEntry(allocator, archive, publication.navigation_document.slice());
+    defer allocator.free(nav);
+    var parser = publication_navigation.Parser.init(publication, publication.navigation_document.slice());
+    try parser.feed(nav);
+    try parser.finish();
+    try std.testing.expectEqual(@as(u8, 2), @import("../src/publication/reading_start.zig").firstChapter(publication));
 }

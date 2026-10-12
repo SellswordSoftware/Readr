@@ -58,6 +58,7 @@ pub const Publication = struct {
     spine: [max_spine_items]SpineEntry = undefined,
     spine_len: u8 = 0,
     chapter_labels: [max_spine_items]ChapterLabel = undefined,
+    reading_start: ?u8 = null,
     navigation_document: NavigationSource = .{},
     ncx_document: NavigationSource = .{},
 
@@ -183,6 +184,18 @@ pub fn parseOpf(xml: []const u8, package_path: []const u8, publication: *Publica
         var href_buffer: [128]u8 = undefined;
         const href = try decodedManifestHref(xml, item, &href_buffer);
         setNavigationSource(&publication.ncx_document, prefix, href);
+    }
+    // EPUB 2 guide references are optional hints, never a reason to reject a book.
+    cursor = 0;
+    while (nextElement(xml, &cursor)) |element| {
+        if (!std.mem.eql(u8, localName(element.name), "reference")) continue;
+        if (!propertiesContain(attribute(element.attributes, "type"), "text")) continue;
+        const raw = attribute(element.attributes, "href") orelse continue;
+        var href: [128]u8 = undefined;
+        var len: u8 = 0;
+        copyValue(raw, &href, &len) catch continue;
+        publication.reading_start = resolveSpineTarget(publication, prefix, href[0..len]) orelse continue;
+        break;
     }
 }
 
@@ -489,4 +502,23 @@ test "keeps navigation sources empty when the OPF declares neither" {
     try parseOpf(opf, "OPS/book.opf", &publication, &workspace);
     try std.testing.expectEqual(@as(usize, 0), publication.navigation_document.slice().len);
     try std.testing.expectEqual(@as(usize, 0), publication.ncx_document.slice().len);
+}
+
+/// Resolve an optional navigation target without changing the reading order.
+pub fn resolveSpineTarget(publication: *const Publication, prefix: []const u8, href: []const u8) ?u8 {
+    var path: [128]u8 = undefined;
+    var len: u8 = 0;
+    resolvePath(prefix, href, &path, &len) catch return null;
+    for (publication.spine[0..publication.spine_len], 0..) |item, index| {
+        if (std.mem.eql(u8, item.slice(), path[0..len])) return @intCast(index);
+    }
+    return null;
+}
+
+test "optional EPUB 2 guide text skips front matter and ignores nonexistent targets" {
+    const opf = "<package><manifest><item id='cover' href='cover.xhtml' media-type='application/xhtml+xml'/><item id='one' href='chapter.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='cover'/><itemref idref='one'/></spine><guide><reference type='text' href='missing.xhtml'/><reference type='text' href='chapter.xhtml#start'/></guide></package>";
+    var publication: Publication = undefined;
+    var workspace: OpfWorkspace = undefined;
+    try parseOpf(opf, "OPS/book.opf", &publication, &workspace);
+    try std.testing.expectEqual(@as(?u8, 1), publication.reading_start);
 }

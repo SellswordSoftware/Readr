@@ -15,6 +15,8 @@ pub const Parser = struct {
     quote: u8 = 0,
     toc_depth: u16 = 0,
     found_toc: bool = false,
+    landmarks_depth: u16 = 0,
+    reading_start: ?u8 = null,
     in_link: bool = false,
     href: [128]u8 = undefined,
     href_len: usize = 0,
@@ -49,7 +51,8 @@ pub const Parser = struct {
 
     pub fn finish(self: *Parser) Error!void {
         if (self.in_tag or self.in_entity) return error.MalformedXml;
-        if (self.in_link) return error.MalformedXml;
+        if (self.in_link or self.landmarks_depth != 0) return error.MalformedXml;
+        if (self.reading_start) |index| self.publication.reading_start = index;
     }
 
     pub fn labelCount(self: *const Parser) u8 {
@@ -83,6 +86,22 @@ pub const Parser = struct {
         if (tag.closing) {
             if (self.in_link and std.mem.eql(u8, localName(tag.name), "a")) try self.finishLink();
             if (self.toc_depth != 0) self.toc_depth -= 1;
+            if (self.landmarks_depth != 0) self.landmarks_depth -= 1;
+            return;
+        }
+        if (self.landmarks_depth != 0) {
+            if (self.reading_start == null and std.mem.eql(u8, localName(tag.name), "a") and typeContains(tag.attributes, "epub:type", "bodymatter")) {
+                if (attribute(tag.attributes, "href")) |raw_href| {
+                    var href: [128]u8 = undefined;
+                    const len = decodeEntities(raw_href, &href) catch 0;
+                    self.reading_start = epub.resolveSpineTarget(self.publication, self.source_directory, href[0..len]);
+                }
+            }
+            if (!tag.self_closing) self.landmarks_depth += 1;
+            return;
+        }
+        if (std.mem.eql(u8, localName(tag.name), "nav") and typeContains(tag.attributes, "epub:type", "landmarks")) {
+            if (!tag.self_closing) self.landmarks_depth = 1;
             return;
         }
         if (self.toc_depth == 0) {
@@ -521,4 +540,24 @@ test "maps nested NCX points in source order" {
     try parser.finish();
     try std.testing.expectEqualStrings("One & only", publication.chapter_labels[0].slice());
     try std.testing.expectEqualStrings("Two", publication.chapter_labels[1].slice());
+}
+
+test "bodymatter landmarks before or after toc select a spine destination only after successful parsing" {
+    const landmark = "<nav epub:type='landmarks'><a epub:type='bodymatter' href='text/two.xhtml#start'>Start reading</a></nav>";
+    const toc = "<nav epub:type='toc'><a href='text/one.xhtml'>Contents</a></nav>";
+    for ([_][]const u8{ landmark ++ toc, toc ++ landmark }) |source| {
+        var publication = fixturePublication();
+        var parser = Parser.init(&publication, "OPS/nav.xhtml");
+        for (source) |byte| try parser.feed(&.{byte});
+        try std.testing.expectEqual(@as(?u8, null), publication.reading_start);
+        try parser.finish();
+        try std.testing.expectEqual(@as(?u8, 1), publication.reading_start);
+        try std.testing.expectEqualStrings("Contents", publication.chapter_labels[0].slice());
+        try std.testing.expectEqual(@as(u8, 0), publication.chapter_labels[1].len);
+    }
+    var publication = fixturePublication();
+    var parser = Parser.init(&publication, "OPS/nav.xhtml");
+    try parser.feed(landmark ++ "<");
+    try std.testing.expectError(error.MalformedXml, parser.finish());
+    try std.testing.expectEqual(@as(?u8, null), publication.reading_start);
 }

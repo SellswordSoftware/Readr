@@ -4,8 +4,8 @@ const zip = @import("../archive/zip.zig");
 
 // Encode bytes explicitly, excluding padding and pointers. Bump the revision when
 // parsing, label policy, or the format changes.
-pub const revision: u32 = 1;
-const header_size = 452;
+pub const revision: u32 = 2;
+const header_size = 453;
 const item_size = 199;
 pub const encoded_size = header_size + epub.max_spine_items * item_size + 4;
 const checksum_offset = encoded_size - 4;
@@ -24,6 +24,9 @@ pub fn encode(bytes: []u8, key: Key, publication: *const epub.Publication, direc
     putString(bytes[178..307], publication.navigation_document.slice());
     putString(bytes[307..436], publication.ncx_document.slice());
     @memcpy(bytes[436..452], &fingerprint);
+    if (publication.reading_start) |index| {
+        if (index < publication.spine_len) bytes[452] = index + 1;
+    }
     for (publication.spine[0..publication.spine_len], 0..) |*item, index| {
         const record = bytes[header_size + index * item_size ..][0..item_size];
         putString(record[0..129], item.slice());
@@ -44,7 +47,7 @@ pub fn decode(bytes: []const u8, key: Key, directory: *const zip.DirectoryIndex,
     if (!std.mem.eql(u8, bytes[16..48], &key.directory_digest)) return false;
     if (get32(bytes, checksum_offset) != std.hash.Crc32.hash(bytes[0..checksum_offset])) return false;
     const count = bytes[48];
-    if (count == 0 or count > epub.max_spine_items) return false;
+    if (count == 0 or count > epub.max_spine_items or bytes[452] > count) return false;
     if (!validString(bytes[49..178]) or !validString(bytes[178..307]) or !validString(bytes[307..436])) return false;
     for (0..count) |index| {
         const record = bytes[header_size + index * item_size ..][0..item_size];
@@ -61,6 +64,7 @@ pub fn decode(bytes: []const u8, key: Key, directory: *const zip.DirectoryIndex,
     }
     @memset(std.mem.asBytes(publication), 0);
     publication.spine_len = count;
+    if (bytes[452] != 0) publication.reading_start = bytes[452] - 1;
     copyString(bytes[49..178], &publication.title, &publication.title_len);
     copyString(bytes[178..307], &publication.navigation_document.path, &publication.navigation_document.path_len);
     copyString(bytes[307..436], &publication.ncx_document.path, &publication.ncx_document.path_len);
@@ -130,8 +134,10 @@ test "publication cache validates identity revision bounds and all spine descrip
     var entries = [_]zip.IndexedEntry{zip.indexedEntry("chapter.xhtml", entry)};
     const directory: zip.DirectoryIndex = .{ .archive = .{ .reader = .{ .context = &context, .size = 1234, .read_at = NullReader.read }, .central_directory_offset = 1000, .central_directory_size = 200, .entry_count = 1 }, .entries = &entries };
     const key: Key = .{ .book_id = 7, .file_size = 1234, .directory_digest = [_]u8{0xa5} ** 32 };
+    original.reading_start = 127;
     encode(bytes, key, original, &directory, [_]u8{3} ** 16);
     try std.testing.expect(decode(bytes, key, &directory, restored));
+    try std.testing.expectEqual(@as(?u8, 127), restored.reading_start);
     try std.testing.expectEqual(@as(u8, epub.max_spine_items), restored.spine_len);
     try std.testing.expectEqualStrings("missing.xhtml", restored.spine[1].slice());
     try std.testing.expectEqualStrings("Chapter label", restored.chapter_labels[127].slice());
@@ -147,7 +153,7 @@ test "publication cache validates identity revision bounds and all spine descrip
     try std.testing.expect(!decode(bytes, wrong, &directory, restored));
     try std.testing.expect(!decode(bytes[0 .. bytes.len - 1], key, &directory, restored));
     // Reject corrupt data, and structurally invalid data with a valid CRC.
-    const mutations = [_]usize{ 4, 48, 49, header_size, header_size + 178, header_size + 179 };
+    const mutations = [_]usize{ 4, 48, 49, 452, header_size, header_size + 178, header_size + 179 };
     for (mutations) |offset| {
         encode(bytes, key, original, &directory, [_]u8{3} ** 16);
         bytes[offset] = 255;

@@ -33,6 +33,7 @@ pub fn build(b: *std.Build) !void {
         "src/platform/display_text.zig",
         "src/publication/epub.zig",
         "src/publication/navigation.zig",
+        "src/publication/reading_start.zig",
         "src/reader/book_session.zig",
         "src/reader/chapter_pump.zig",
         "src/reader/decode_workspace.zig",

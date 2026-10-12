@@ -1,3 +1,4 @@
+const reading_start = @import("../publication/reading_start.zig");
 const reading_location = @import("reading_location.zig");
 const book_session = @import("book_session.zig");
 const chapter_pump = @import("chapter_pump.zig");
@@ -1116,7 +1117,8 @@ pub const ReaderCoordinator = struct {
             self.changeScreen(.chapter_browser);
         } else {
             self.beginReading();
-            self.opening_chapter_request = 0;
+            self.chapter_index = reading_start.firstChapter(&self.book_session.publication);
+            self.opening_chapter_request = self.chapter_index;
         }
     }
 
@@ -4198,13 +4200,15 @@ test "coordinator turns a successful navigation result into a chapter request" {
     coordinator.book_session.opening_job = try std.testing.allocator.create(opening_session.Session);
     coordinator.book_session.opening_job.?.* = opening_session.Session.start();
     coordinator.book_session.opening_job.?.succeed();
+    coordinator.book_session.publication.spine_len = 3;
+    coordinator.book_session.publication.reading_start = 2;
 
     coordinator.finishOpening();
 
     try std.testing.expect(coordinator.book_session.opening_job == null);
     try std.testing.expectEqual(Lifecycle.ready, coordinator.lifecycle);
     try std.testing.expectEqual(Screen.reading, coordinator.screen);
-    try std.testing.expectEqual(@as(?u8, 0), coordinator.takeOpeningChapterRequest());
+    try std.testing.expectEqual(@as(?u8, 2), coordinator.takeOpeningChapterRequest());
     try std.testing.expect(coordinator.takeOpeningChapterRequest() == null);
 }
 
@@ -5125,17 +5129,19 @@ test "lifecycle pause flushes dirty partial progress and pace and retains failed
     try std.testing.expectEqual(@as(usize, 1), files.pace_writes);
 }
 
-test "lifecycle pause during resume reconstruction retains the destination chapter and word" {
+test "lifecycle pause during resume reconstruction honors saved positions before the new book start" {
     for ([_]ReadingMode{ .paged, .rsvp }) |mode| {
         var files = PauseStoreFake{};
         var coordinator: ReaderCoordinator = undefined;
         try initPauseTest(&coordinator, &files);
         coordinator.mode = mode;
-        coordinator.book_session.publication.spine_len = 2;
+        coordinator.book_session.publication.spine_len = 3;
+        coordinator.book_session.publication.reading_start = 2;
+        coordinator.chapter_index = 2;
         const saved = persistence.ReadingSnapshot{ .book_id = coordinator.bookIdentity(), .layout_revision = layout_revision, .chapter = 1, .word_ordinal = 123, .mode = if (mode == .rsvp) .rsvp else .paged };
         try std.testing.expect(coordinator.persistence.?.savePosition(coordinator.active_book.slice(), saved));
         coordinator.restorePosition();
-        try std.testing.expectEqual(@as(u8, 0), coordinator.chapter_index);
+        try std.testing.expectEqual(@as(u8, 2), coordinator.chapter_index);
         try std.testing.expectEqual(@as(u8, 1), coordinator.chapter_pump.chapter_open.?.index);
         coordinator.systemPaused(1);
         const restored = coordinator.persistence.?.loadPosition(coordinator.active_book.slice(), coordinator.bookIdentity(), layout_revision) orelse return error.TestExpectedEqual;
